@@ -1,0 +1,12 @@
+[package]
+name = "gengine_clipboard"
+version = "0.0.0"
+edition = "2024"
+
+[lib]
+crate-type = ["lib"]
+
+[features]
+default = []
+follow_links = []
+follow_html_img = []
