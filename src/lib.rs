@@ -23,10 +23,11 @@ pub enum ClipboardEvent {
 pub struct Clipboard;
 
 impl Clipboard {
-	pub fn new<F: FnMut(ClipboardEvent) + WasmOrSync>(f: F) -> Self {
+	pub fn new<F: FnMut(ClipboardEvent) + WasmOrSync>(callback: F) -> Self {
 		todo!()
 	}
 
+	#[cfg(not(target_arch = "wasm32"))]
 	pub fn copy() {
 		todo!()
 	}

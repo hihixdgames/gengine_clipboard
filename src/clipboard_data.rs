@@ -17,4 +17,3 @@ pub enum Image {
 	ICO(Vec<u8>),
 	TIFF(Vec<u8>),
 }
-

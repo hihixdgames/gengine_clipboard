@@ -1,2 +1,1 @@
-pub enum ClipboardError {
-}
+pub enum ClipboardError {}
