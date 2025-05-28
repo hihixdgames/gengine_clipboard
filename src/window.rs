@@ -51,6 +51,9 @@ fn spawn_thread<F: FnMut(crate::ClipboardEvent) + crate::WasmOrSend>(
 					// of option)
 					let mut clipboard: Option<()> = None;
 					for _ in 0..N_RETRIES {
+						if clipboard.is_some() {
+							break;
+						}
 						thread::sleep(TIME_BETWEEN_RETRIES);
 						// Retry to get clipboard and set to variable
 					}
