@@ -14,6 +14,7 @@ pub trait WasmOrSend {}
 #[cfg(target_arch = "wasm32")]
 impl<T> WasmOrSend for T {}
 
+#[derive(Debug)]
 pub enum ClipboardEvent {
 	StartedPasteHandling,
 	FailedPasteHandling(ClipboardError),

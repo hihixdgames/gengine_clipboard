@@ -1,13 +1,16 @@
+#[derive(Debug)]
 pub enum ClipboardData {
 	Text(Text),
 	Image(Image),
 }
 
+#[derive(Debug)]
 pub enum Text {
 	Plain(String),
 	HTML(String),
 }
 
+#[derive(Debug)]
 pub enum Image {
 	GIF(Vec<u8>),
 	PNG(Vec<u8>),
