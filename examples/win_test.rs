@@ -1,17 +1,18 @@
 use gengine_clipboard::{Clipboard, ClipboardEvent};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 fn main() {
-	let success_flag = Arc::new(Mutex::new(false));
-	let success_flag_cb = Arc::clone(&success_flag);
+	let pair = Arc::new((Mutex::new(false), Condvar::new()));
+	let pair_cb = Arc::clone(&pair);
 
-	let clipboard = Clipboard::new(move |event| match event {
+	let _clipboard = Clipboard::new(move |event| match event {
 		ClipboardEvent::Paste(_, _) => {
 			println!("Got paste: {:?}", event);
-			let mut flag = success_flag_cb.lock().unwrap();
-			*flag = true;
+			let (lock, cvar) = &*pair_cb;
+			let mut success = lock.lock().unwrap();
+			*success = true;
+			cvar.notify_one();
 		}
 		ClipboardEvent::FailedPasteHandling(err) => {
 			eprintln!("Error: {:?}", err);
@@ -21,17 +22,31 @@ fn main() {
 
 	println!("Watching clipboard...");
 
-	{
-		let mut flag = success_flag.lock().unwrap();
-		*flag = false;
-	}
-	println!("Calling copy() (internal retry up to 5 times)");
-	clipboard.get_data();
+	_clipboard.get_data();
 
-	for _ in 0..6 {
-		thread::sleep(Duration::from_secs(1));
-		if *success_flag.lock().unwrap() {
+	let (lock, cvar) = &*pair;
+	let mut success = lock.lock().unwrap();
+	let timeout = Duration::from_secs(6);
+	let start = Instant::now();
+
+	while !*success {
+		let elapsed = start.elapsed();
+		if elapsed >= timeout {
+			eprintln!("Timeout waiting for clipboard data.");
 			break;
 		}
+		let remaining = timeout - elapsed;
+		let (s, wait_result) = cvar.wait_timeout(success, remaining).unwrap();
+		success = s;
+		if wait_result.timed_out() && !*success {
+			eprintln!("Timeout waiting for clipboard data.");
+			break;
+		}
+	}
+
+	if *success {
+		println!("Clipboard data successfully handled.");
+	} else {
+		eprintln!("Clipboard data was not received.");
 	}
 }

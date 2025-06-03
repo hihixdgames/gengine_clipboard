@@ -1,10 +1,14 @@
+use std::ffi::OsStr;
+use std::fmt;
+use std::fs::File;
+use std::io::{self, Write};
+use std::os::windows::ffi::OsStrExt;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{
-	BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits, GetObjectW,
-	HBITMAP, RGBQUAD, ReleaseDC,
+	BI_RGB, BITMAP, BITMAPFILEHEADER, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC,
+	GetDIBits, GetObjectW, HBITMAP, RGBQUAD, ReleaseDC,
 };
 use windows::Win32::System::DataExchange::{
 	CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
@@ -13,83 +17,43 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::*;
 use windows::core::PCSTR;
 
-use crate::Image;
-use crate::{ClipboardData, ClipboardError, ClipboardEvent, InternalClipboard};
+use crate::clipboard_data::{ClipboardData, Image, Text};
+use crate::{ClipboardError, ClipboardEvent, InternalClipboard};
 
 const CF_UNICODETEXT: u32 = 13;
 const CF_BITMAP: u32 = 2;
-const GIF87A: &[u8] = b"GIF87a";
-const GIF89A: &[u8] = b"GIF89a";
-const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
-const JPEG_MAGIC: &[u8] = b"\xFF\xD8\xFF";
-const WEBP_MAGIC: &[u8] = b"RIFF";
-const WEBP_SIGNATURE: &[u8] = b"WEBP";
-const ICO_MAGIC: &[u8] = b"\x00\x00\x01\x00";
-const TIFF_MAGIC_LE: &[u8] = b"II*\x00";
-const TIFF_MAGIC_BE: &[u8] = b"MM\x00*";
+const CF_DIB: u32 = 8;
+const BF_TYPE_BM: u16 = 0x4D42;
 
 const N_RETRIES: usize = 5;
-const TIME_BETWEEN_RETRIES: Duration = Duration::from_millis(100);
+const TIME_BETWEEN_RETRIES: u64 = 100;
 
-pub fn try_read_clipboard_format(format: u32) -> Result<Vec<u8>, ClipboardError> {
-	unsafe {
-		let handle = GetClipboardData(format).map_err(|_| ClipboardError::Empty)?;
-		if handle.0.is_null() {
-			let _ = CloseClipboard();
-			return Err(ClipboardError::Empty);
+impl fmt::Display for Text {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Text::Plain(s) | Text::HTML(s) => write!(f, "{}", s),
 		}
-		let hglobal = HGLOBAL(handle.0 as *mut _);
-		let ptr = GlobalLock(hglobal) as *const u8;
-		if ptr.is_null() {
-			let _ = CloseClipboard();
-			return Err(ClipboardError::LockFailed);
-		}
-		let size = GlobalSize(hglobal);
-		let slice = std::slice::from_raw_parts(ptr, size);
-		let data = slice.to_vec();
-		let _ = GlobalUnlock(hglobal);
-		Ok(data)
 	}
 }
 
-pub fn try_read_clipboard_text() -> Result<String, ClipboardError> {
-	unsafe {
-		if OpenClipboard(None).is_err() {
-			return Err(ClipboardError::OpenFailed);
-		}
-		IsClipboardFormatAvailable(CF_UNICODETEXT)
-			.map_err(|_| ClipboardError::FormatNotAvailable)?;
-		let handle = GetClipboardData(CF_UNICODETEXT).map_err(|_| ClipboardError::Empty)?;
-		if handle.0.is_null() {
-			let _ = CloseClipboard();
-			return Err(ClipboardError::Empty);
-		}
-		let hglobal = HGLOBAL(handle.0);
-		let ptr = GlobalLock(hglobal) as *const u16;
-		if ptr.is_null() {
-			let _ = CloseClipboard();
-			return Err(ClipboardError::LockFailed);
-		}
-		let len = (0..).take_while(|&i| *ptr.add(i) != 0).count();
-		let slice = std::slice::from_raw_parts(ptr, len);
-		let result = String::from_utf16(slice).map_err(|_| ClipboardError::Utf16ConversionFailed);
-		let _ = CloseClipboard();
-		let _ = GlobalUnlock(hglobal);
-		result
+fn retry_or_err<E>(attempt: usize, max_retries: usize, err: E) -> Result<(), E> {
+	if attempt == max_retries {
+		Err(err)
+	} else {
+		std::thread::sleep(std::time::Duration::from_millis(TIME_BETWEEN_RETRIES));
+		Ok(())
 	}
 }
 
-pub fn try_read_clipboard_image() -> Result<Vec<u8>, ClipboardError> {
+pub fn try_read_clipboard_bitmap_and_save<P: AsRef<std::path::Path>>(
+	output_path: P,
+) -> Result<(), ClipboardError> {
 	unsafe {
-		if OpenClipboard(None).is_err() {
-			return Err(ClipboardError::OpenFailed);
-		}
-		IsClipboardFormatAvailable(CF_BITMAP).map_err(|_| ClipboardError::FormatNotAvailable)?;
 		let handle = GetClipboardData(CF_BITMAP).map_err(|_| ClipboardError::Empty)?;
 		if handle.0.is_null() {
-			let _ = CloseClipboard();
 			return Err(ClipboardError::Empty);
 		}
+
 		let hbitmap = HBITMAP(handle.0);
 		let mut bmp = BITMAP::default();
 		if GetObjectW(
@@ -98,9 +62,9 @@ pub fn try_read_clipboard_image() -> Result<Vec<u8>, ClipboardError> {
 			Some(&mut bmp as *mut _ as *mut _),
 		) == 0
 		{
-			let _ = CloseClipboard();
 			return Err(ClipboardError::LockFailed);
 		}
+
 		let mut bmi = BITMAPINFO {
 			bmiHeader: BITMAPINFOHEADER {
 				biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -113,14 +77,17 @@ pub fn try_read_clipboard_image() -> Result<Vec<u8>, ClipboardError> {
 			},
 			bmiColors: [RGBQUAD::default(); 1],
 		};
+
 		let width = bmp.bmWidth as usize;
 		let height = bmp.bmHeight as usize;
-		let mut buffer = vec![0u8; width * height * 4];
+		let pixel_data_size = width * height * 4;
+		let mut buffer = vec![0u8; pixel_data_size];
+
 		let hdc = GetDC(None);
 		if hdc.0.is_null() {
-			let _ = CloseClipboard();
 			return Err(ClipboardError::LockFailed);
 		}
+
 		let scanlines = GetDIBits(
 			hdc,
 			hbitmap,
@@ -130,30 +97,267 @@ pub fn try_read_clipboard_image() -> Result<Vec<u8>, ClipboardError> {
 			&mut bmi,
 			DIB_RGB_COLORS,
 		);
+
 		ReleaseDC(None, hdc);
-		let _ = CloseClipboard();
+
 		if scanlines == 0 {
 			return Err(ClipboardError::LockFailed);
 		}
-		Ok(buffer)
+
+		let file_header_size = std::mem::size_of::<BITMAPFILEHEADER>();
+		let info_header_size = std::mem::size_of::<BITMAPINFOHEADER>();
+		let file_size = file_header_size + info_header_size + pixel_data_size;
+
+		let file_header = BITMAPFILEHEADER {
+			bfType: BF_TYPE_BM,
+			bfSize: file_size as u32,
+			bfReserved1: 0,
+			bfReserved2: 0,
+			bfOffBits: (file_header_size + info_header_size) as u32,
+		};
+
+		let mut file = File::create(output_path).map_err(|_| ClipboardError::WriteFailed)?;
+
+		file.write_all(std::slice::from_raw_parts(
+			&file_header as *const _ as *const u8,
+			file_header_size,
+		))
+		.map_err(|_| ClipboardError::WriteFailed)?;
+
+		file.write_all(std::slice::from_raw_parts(
+			&bmi.bmiHeader as *const _ as *const u8,
+			info_header_size,
+		))
+		.map_err(|_| ClipboardError::WriteFailed)?;
+
+		file.write_all(&buffer)
+			.map_err(|_| ClipboardError::WriteFailed)?;
+
+		Ok(())
 	}
 }
 
-fn detect_image_type(data: &[u8]) -> Option<Image> {
-	if data.starts_with(GIF87A) || data.starts_with(GIF89A) {
+pub fn detect_image_type(data: &[u8]) -> Option<Image> {
+	if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
 		Some(Image::GIF(data.to_vec()))
-	} else if data.starts_with(PNG_MAGIC) {
+	} else if data.starts_with(b"\x89PNG\r\n\x1a\n") {
 		Some(Image::PNG(data.to_vec()))
-	} else if data.starts_with(JPEG_MAGIC) {
+	} else if data.starts_with(b"\xFF\xD8\xFF") {
 		Some(Image::JPEG(data.to_vec()))
-	} else if data.len() > 12 && &data[0..4] == WEBP_MAGIC && &data[8..12] == WEBP_SIGNATURE {
+	} else if data.len() > 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
 		Some(Image::WEBP(data.to_vec()))
-	} else if data.starts_with(ICO_MAGIC) {
-		Some(Image::ICO(data.to_vec()))
-	} else if data.starts_with(TIFF_MAGIC_LE) || data.starts_with(TIFF_MAGIC_BE) {
-		Some(Image::TIFF(data.to_vec()))
 	} else {
 		None
+	}
+}
+
+pub struct ClipboardHandle;
+
+impl ClipboardHandle {
+	pub fn new() -> Result<Self, ClipboardError> {
+		unsafe {
+			OpenClipboard(None).map_err(|_| ClipboardError::OpenFailed)?;
+		}
+		Ok(Self {})
+	}
+
+	pub fn read_data(&self, format: u32) -> Result<ClipboardData, ClipboardError> {
+		unsafe {
+			let png_format = RegisterClipboardFormatA(PCSTR(b"PNG\0".as_ptr()));
+			let jpeg_format = RegisterClipboardFormatA(PCSTR(b"JPEG\0".as_ptr()));
+			let image_png_format = RegisterClipboardFormatA(PCSTR(b"image/png\0".as_ptr()));
+			let gif_format = RegisterClipboardFormatA(PCSTR(b"GIF\0".as_ptr()));
+			let webp_format = RegisterClipboardFormatA(PCSTR(b"WEBP\0".as_ptr()));
+			let html_format = RegisterClipboardFormatA(PCSTR(b"HTML Format\0".as_ptr()));
+
+			for attempt in 1..=N_RETRIES {
+				if IsClipboardFormatAvailable(format).is_err() {
+					retry_or_err(attempt, N_RETRIES, ClipboardError::FormatNotAvailable)?;
+					continue;
+				}
+
+				let handle = GetClipboardData(format);
+				if handle.is_err() || handle.unwrap().0.is_null() {
+					retry_or_err(attempt, N_RETRIES, ClipboardError::Empty)?;
+					continue;
+				}
+
+				let handle = match GetClipboardData(format) {
+					Ok(h) if !h.0.is_null() => h,
+					_ => {
+						retry_or_err(attempt, N_RETRIES, ClipboardError::Empty)?;
+						continue;
+					}
+				};
+
+				if format == CF_UNICODETEXT {
+					let hglobal = HGLOBAL(handle.0);
+					let ptr = GlobalLock(hglobal);
+					if ptr.is_null() {
+						retry_or_err(attempt, N_RETRIES, ClipboardError::LockFailed)?;
+						continue;
+					}
+
+					let mut len = 0;
+					loop {
+						let wchar = *(ptr.add(len * 2) as *const u16);
+						if wchar == 0 {
+							break;
+						}
+						len += 1;
+					}
+
+					let slice = std::slice::from_raw_parts(ptr as *const u16, len);
+					let string = String::from_utf16(slice)
+						.map_err(|_| ClipboardError::Utf16ConversionFailed)?;
+
+					let _ = GlobalUnlock(hglobal);
+
+					return Ok(ClipboardData::Text(Text::Plain(string)));
+				}
+
+				if format == CF_BITMAP {
+					let output_path = std::path::Path::new("bitmap.bmp");
+					match try_read_clipboard_bitmap_and_save(output_path) {
+						Ok(_) => {
+							let data = std::fs::read(output_path)
+								.map_err(|_| ClipboardError::ReadFailed)?;
+							return Ok(ClipboardData::Image(Image::BMP(data)));
+						}
+						Err(_) => {
+							retry_or_err(attempt, N_RETRIES, ClipboardError::WriteFailed)?;
+							continue;
+						}
+					}
+				}
+
+				if format == png_format
+					|| format == image_png_format
+					|| format == jpeg_format
+					|| format == gif_format
+					|| format == webp_format
+				{
+					let hglobal = HGLOBAL(handle.0);
+					let ptr = GlobalLock(hglobal);
+					if ptr.is_null() {
+						retry_or_err(attempt, N_RETRIES, ClipboardError::LockFailed)?;
+						continue;
+					}
+
+					let size = GlobalSize(hglobal);
+					let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+					let image_data = slice.to_vec();
+
+					let _ = GlobalUnlock(hglobal);
+
+					if let Some(image) = detect_image_type(&image_data) {
+						return Ok(ClipboardData::Image(image));
+					}
+
+					retry_or_err(attempt, N_RETRIES, ClipboardError::FormatNotAvailable)?;
+					continue;
+				}
+			}
+
+			Err(ClipboardError::FormatNotAvailable)
+		}
+	}
+
+	pub fn write_data(&self, data: &ClipboardData) -> Result<(), ClipboardError> {
+		unsafe {
+			match data {
+				ClipboardData::Text(text) => {
+					let s = match text {
+						Text::Plain(plain) => plain.as_str(),
+						Text::HTML(html) => html.as_str(),
+					};
+
+					let wide: Vec<u16> = OsStr::new(s)
+						.encode_wide()
+						.chain(std::iter::once(0))
+						.collect();
+
+					let size = wide.len() * std::mem::size_of::<u16>();
+
+					let hglobal = GlobalAlloc(GMEM_MOVEABLE, size)
+						.map_err(|_| ClipboardError::AllocationFailed)?;
+
+					if hglobal.is_invalid() {
+						return Err(ClipboardError::AllocationFailed);
+					}
+
+					let ptr = GlobalLock(hglobal);
+					if ptr.is_null() {
+						let _ = GlobalUnlock(hglobal);
+						return Err(ClipboardError::LockFailed);
+					}
+
+					std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, size);
+					let _ = GlobalUnlock(hglobal);
+
+					SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hglobal.0)))
+						.map_err(|_| ClipboardError::SetFailed)?;
+				}
+
+				ClipboardData::Image(image) => match image {
+					Image::PNG(data) => {
+						let png_format = RegisterClipboardFormatA(PCSTR(b"PNG\0".as_ptr()));
+
+						let hglobal = GlobalAlloc(GMEM_MOVEABLE, data.len())
+							.map_err(|_| ClipboardError::AllocationFailed)?;
+
+						if hglobal.is_invalid() {
+							return Err(ClipboardError::AllocationFailed);
+						}
+
+						let ptr = GlobalLock(hglobal);
+						if ptr.is_null() {
+							let _ = GlobalUnlock(hglobal);
+							return Err(ClipboardError::LockFailed);
+						}
+
+						std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+						let _ = GlobalUnlock(hglobal);
+
+						SetClipboardData(png_format, Some(HANDLE(hglobal.0)))
+							.map_err(|_| ClipboardError::SetFailed)?;
+					}
+
+					Image::BMP(data) => {
+						let hglobal = GlobalAlloc(GMEM_MOVEABLE, data.len())
+							.map_err(|_| ClipboardError::AllocationFailed)?;
+
+						if hglobal.is_invalid() {
+							return Err(ClipboardError::AllocationFailed);
+						}
+
+						let ptr = GlobalLock(hglobal);
+						if ptr.is_null() {
+							let _ = GlobalUnlock(hglobal);
+							return Err(ClipboardError::LockFailed);
+						}
+
+						std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+						let _ = GlobalUnlock(hglobal);
+
+						SetClipboardData(CF_DIB, Some(HANDLE(hglobal.0)))
+							.map_err(|_| ClipboardError::SetFailed)?;
+					}
+
+					_ => return Err(ClipboardError::FormatNotAvailable),
+				},
+			}
+
+			Ok(())
+		}
+	}
+}
+
+impl Drop for ClipboardHandle {
+	fn drop(&mut self) {
+		unsafe {
+			CloseClipboard().ok();
+		}
 	}
 }
 
@@ -191,192 +395,56 @@ fn spawn_thread<F: FnMut(crate::ClipboardEvent) + crate::WasmOrSend>(
 	receiver: Receiver<ThreadCommand>,
 	mut callback: F,
 ) -> JoinHandle<()> {
-	#[allow(clippy::manual_c_str_literals)]
 	thread::spawn(move || {
-		let png_format = unsafe { RegisterClipboardFormatA(PCSTR(b"PNG\0".as_ptr())) };
-		let jpeg_format = unsafe { RegisterClipboardFormatA(PCSTR(b"JPEG\0".as_ptr())) };
-		let image_png_format = unsafe { RegisterClipboardFormatA(PCSTR(b"image/png\0".as_ptr())) };
-		let webp_format = unsafe { RegisterClipboardFormatA(PCSTR(b"WEBP\0".as_ptr())) };
-		let html_format = unsafe { RegisterClipboardFormatA(PCSTR(b"HTML Format\0".as_ptr())) };
 		for command in receiver {
 			match command {
 				ThreadCommand::GetData => {
-					let mut clipboard_opened = false;
-					for _ in 0..N_RETRIES {
-						unsafe {
-							if OpenClipboard(None).is_ok() {
-								clipboard_opened = true;
-								break;
-							}
+					let handle = match ClipboardHandle::new() {
+						Ok(h) => h,
+						Err(e) => {
+							callback(ClipboardEvent::FailedPasteHandling(e));
+							continue;
 						}
-						thread::sleep(TIME_BETWEEN_RETRIES);
-					}
-					if !clipboard_opened {
-						callback(ClipboardEvent::FailedPasteHandling(ClipboardError::InUse));
-						continue;
+					};
+
+					let mut format = 0u32;
+					let mut found = false;
+
+					loop {
+						format = unsafe { EnumClipboardFormats(format) };
+						if format == 0 {
+							break;
+						}
+
+						if let Ok(data) = handle.read_data(format) {
+							callback(ClipboardEvent::Paste(data, None));
+							found = true;
+							break;
+						}
 					}
 
-					unsafe {
-						let mut format = 0u32;
-						let mut found = false;
-						loop {
-							format = EnumClipboardFormats(format);
-							if format == 0 {
-								break;
-							}
-							match format {
-								f if f == html_format => {
-									if let Ok(data) = try_read_clipboard_format(f) {
-										if let Ok(html) = String::from_utf8(data) {
-											callback(ClipboardEvent::Paste(
-												ClipboardData::Text(crate::Text::HTML(html)),
-												None,
-											));
-											found = true;
-											break;
-										}
-									}
-								}
-								f if f == CF_UNICODETEXT => {
-									if let Ok(text) = try_read_clipboard_text() {
-										callback(ClipboardEvent::Paste(
-											ClipboardData::Text(crate::Text::Plain(text)),
-											None,
-										));
-										found = true;
-										break;
-									}
-								}
-								f if f == png_format
-									|| f == image_png_format || f == jpeg_format
-									|| f == webp_format =>
-								{
-									if let Ok(data) = try_read_clipboard_format(f) {
-										if let Some(image) = detect_image_type(&data) {
-											callback(ClipboardEvent::Paste(
-												ClipboardData::Image(image),
-												None,
-											));
-											found = true;
-											break;
-										}
-									}
-								}
-								f if f == CF_BITMAP => {
-									if let Ok(data) = try_read_clipboard_image() {
-										callback(ClipboardEvent::Paste(
-											ClipboardData::Image(crate::Image::BMP(data)),
-											None,
-										));
-										found = true;
-										break;
-									}
-								}
-								_ => {}
-							}
-							let _ = CloseClipboard();
-						}
-						if !found {
-							callback(ClipboardEvent::FailedPasteHandling(
-								ClipboardError::FormatNotAvailable,
-							));
-						}
+					if !found {
+						callback(ClipboardEvent::FailedPasteHandling(
+							ClipboardError::FormatNotAvailable,
+						));
 					}
 				}
+
 				ThreadCommand::Write(data) => {
-					let mut clipboard_opened = false;
-					for _ in 0..N_RETRIES {
-						unsafe {
-							if OpenClipboard(None).is_ok() {
-								clipboard_opened = true;
-								break;
-							}
+					let handle = match ClipboardHandle::new() {
+						Ok(h) => h,
+						Err(e) => {
+							callback(ClipboardEvent::FailedPasteHandling(e));
+							continue;
 						}
-						thread::sleep(TIME_BETWEEN_RETRIES);
-					}
-					if !clipboard_opened {
-						callback(ClipboardEvent::FailedPasteHandling(ClipboardError::InUse));
-						continue;
-					}
+					};
 
-					unsafe {
-						let _ = EmptyClipboard();
-						match data {
-							ClipboardData::Text(crate::Text::Plain(ref text)) => {
-								if let Ok(wide) = widestring::U16CString::from_str(text) {
-									let bytes = wide.as_slice_with_nul();
-									let size = std::mem::size_of_val(bytes);
-									let hmem_result = GlobalAlloc(GMEM_MOVEABLE, size);
-									if let Ok(hmem) = hmem_result {
-										if !hmem.0.is_null() {
-											let ptr = GlobalLock(hmem) as *mut u8;
-											if !ptr.is_null() {
-												std::ptr::copy_nonoverlapping(
-													bytes.as_ptr() as *const u8,
-													ptr,
-													size,
-												);
-												let _ = GlobalUnlock(hmem);
-												let _ = SetClipboardData(
-													CF_UNICODETEXT,
-													Some(HANDLE(hmem.0)),
-												);
-											}
-										}
-									}
-								}
-							}
-							ClipboardData::Text(crate::Text::HTML(ref html)) => {
-								let html_bytes = html.as_bytes();
-								let size = html_bytes.len();
-								let hmem_result = GlobalAlloc(GMEM_MOVEABLE, size);
-								if let Ok(hmem) = hmem_result {
-									if !hmem.0.is_null() {
-										let ptr = GlobalLock(hmem) as *mut u8;
-										if !ptr.is_null() {
-											std::ptr::copy_nonoverlapping(
-												html_bytes.as_ptr(),
-												ptr,
-												size,
-											);
-											let _ = GlobalUnlock(hmem);
-											let _ =
-												SetClipboardData(html_format, Some(HANDLE(hmem.0)));
-										}
-									}
-								}
-							}
-							ClipboardData::Image(ref image) => {
-								// Image conversions here
-								if let crate::Image::PNG(data) = image {
-									let size = data.len();
-									let hmem_result = GlobalAlloc(GMEM_MOVEABLE, size);
-									if let Ok(hmem) = hmem_result {
-										if !hmem.0.is_null() {
-											let ptr = GlobalLock(hmem) as *mut u8;
-											if !ptr.is_null() {
-												std::ptr::copy_nonoverlapping(
-													data.as_ptr(),
-													ptr,
-													size,
-												);
-												let _ = GlobalUnlock(hmem);
-												let _ = SetClipboardData(
-													png_format,
-													Some(HANDLE(hmem.0)),
-												);
-											}
-										}
-									}
-								}
-							}
-						}
-						let _ = CloseClipboard();
+					if let Err(e) = handle.write_data(&data) {
+						callback(ClipboardEvent::FailedPasteHandling(e));
 					}
 				}
-				ThreadCommand::Exit => {
-					return;
-				}
+
+				ThreadCommand::Exit => return,
 			}
 		}
 	})

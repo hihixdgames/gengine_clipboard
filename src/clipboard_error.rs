@@ -1,5 +1,7 @@
 #[derive(Debug)]
 pub enum ClipboardError {
+	AllocationFailed,
+	SetFailed,
 	OpenFailed,
 	FormatNotAvailable,
 	LockFailed,
@@ -7,5 +9,6 @@ pub enum ClipboardError {
 	Utf16ConversionFailed,
 	Empty,
 	InUse,
+	WriteFailed,
 	Unknown(String),
 }
