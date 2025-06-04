@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -24,6 +24,7 @@ const CF_UNICODETEXT: u32 = 13;
 const CF_BITMAP: u32 = 2;
 const CF_DIB: u32 = 8;
 const BF_TYPE_BM: u16 = 0x4D42;
+const CF_HDROP: u32 = 15;
 
 const N_RETRIES: usize = 5;
 const TIME_BETWEEN_RETRIES: u64 = 100;
@@ -36,11 +37,18 @@ impl fmt::Display for Text {
 	}
 }
 
-fn retry_or_err<E>(attempt: usize, max_retries: usize, err: E) -> Result<(), E> {
+fn retry_or_err(
+	attempt: usize,
+	max_retries: usize,
+	err: ClipboardError,
+) -> Result<(), ClipboardError> {
 	if attempt == max_retries {
 		Err(err)
 	} else {
 		std::thread::sleep(std::time::Duration::from_millis(TIME_BETWEEN_RETRIES));
+		unsafe {
+			OpenClipboard(None).map_err(|_| ClipboardError::OpenFailed)?;
+		}
 		Ok(())
 	}
 }
@@ -166,6 +174,7 @@ impl ClipboardHandle {
 			let png_format = RegisterClipboardFormatA(PCSTR(b"PNG\0".as_ptr()));
 			let jpeg_format = RegisterClipboardFormatA(PCSTR(b"JPEG\0".as_ptr()));
 			let image_png_format = RegisterClipboardFormatA(PCSTR(b"image/png\0".as_ptr()));
+			let image_jpeg_format = RegisterClipboardFormatA(PCSTR(b"image/jpeg\0".as_ptr()));
 			let gif_format = RegisterClipboardFormatA(PCSTR(b"GIF\0".as_ptr()));
 			let webp_format = RegisterClipboardFormatA(PCSTR(b"WEBP\0".as_ptr()));
 			let html_format = RegisterClipboardFormatA(PCSTR(b"HTML Format\0".as_ptr()));
@@ -176,19 +185,12 @@ impl ClipboardHandle {
 					continue;
 				}
 
-				let handle = GetClipboardData(format);
-				if handle.is_err() || handle.unwrap().0.is_null() {
+				let handle_result = GetClipboardData(format);
+				if handle_result.is_err() || handle_result.as_ref().unwrap().0.is_null() {
 					retry_or_err(attempt, N_RETRIES, ClipboardError::Empty)?;
 					continue;
 				}
-
-				let handle = match GetClipboardData(format) {
-					Ok(h) if !h.0.is_null() => h,
-					_ => {
-						retry_or_err(attempt, N_RETRIES, ClipboardError::Empty)?;
-						continue;
-					}
-				};
+				let handle = handle_result.unwrap();
 
 				if format == CF_UNICODETEXT {
 					let hglobal = HGLOBAL(handle.0);
@@ -212,8 +214,77 @@ impl ClipboardHandle {
 						.map_err(|_| ClipboardError::Utf16ConversionFailed)?;
 
 					let _ = GlobalUnlock(hglobal);
-
 					return Ok(ClipboardData::Text(Text::Plain(string)));
+				}
+
+				if format == html_format {
+					let hglobal = HGLOBAL(handle.0);
+					let ptr = GlobalLock(hglobal);
+					if ptr.is_null() {
+						retry_or_err(attempt, N_RETRIES, ClipboardError::LockFailed)?;
+						continue;
+					}
+
+					let size = GlobalSize(hglobal);
+					let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+					let html = String::from_utf8_lossy(slice).to_string();
+
+					let _ = GlobalUnlock(hglobal);
+					return Ok(ClipboardData::Text(Text::HTML(html)));
+				}
+
+				if format == CF_HDROP {
+					use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+					use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+					let hglobal = HGLOBAL(handle.0);
+					let ptr = GlobalLock(hglobal);
+					if ptr.is_null() {
+						retry_or_err(attempt, N_RETRIES, ClipboardError::LockFailed)?;
+						continue;
+					}
+
+					let hdrop = HDROP(ptr);
+					let file_count = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
+
+					for i in 0..file_count {
+						let mut buffer = vec![0u16; 260];
+						let len = DragQueryFileW(hdrop, i, Some(&mut buffer[..]));
+						buffer.truncate(len as usize);
+
+						if let Ok(path) = OsString::from_wide(&buffer).into_string() {
+							let path_obj = std::path::Path::new(&path);
+							if let Some(ext) = path_obj.extension().and_then(|e| e.to_str()) {
+								let ext_lower = ext.to_ascii_lowercase();
+
+								let file_data = match std::fs::read(path_obj) {
+									Ok(data) => data,
+									Err(_) => continue,
+								};
+
+								let output_filename = match ext_lower.as_str() {
+									"png" => "png.png",
+									"jpeg" | "jpg" => "jpeg.jpg",
+									"webp" => "webp.webp",
+									"gif" => "gif.gif",
+									_ => continue,
+								};
+
+								if std::fs::write(output_filename, &file_data).is_err() {
+									continue;
+								}
+
+								if let Some(image) = detect_image_type(&file_data) {
+									let _ = GlobalUnlock(hglobal);
+									return Ok(ClipboardData::Image(image));
+								}
+							}
+						}
+					}
+
+					let _ = GlobalUnlock(hglobal);
+					retry_or_err(attempt, N_RETRIES, ClipboardError::FormatNotAvailable)?;
+					continue;
 				}
 
 				if format == CF_BITMAP {
@@ -234,6 +305,7 @@ impl ClipboardHandle {
 				if format == png_format
 					|| format == image_png_format
 					|| format == jpeg_format
+					|| format == image_jpeg_format
 					|| format == gif_format
 					|| format == webp_format
 				{
@@ -250,17 +322,37 @@ impl ClipboardHandle {
 
 					let _ = GlobalUnlock(hglobal);
 
-					if let Some(image) = detect_image_type(&image_data) {
+					let ext = match detect_image_type(&image_data) {
+						Some(Image::PNG(_)) => "png",
+						Some(Image::JPEG(_)) => "jpg",
+						Some(Image::GIF(_)) => "gif",
+						Some(Image::WEBP(_)) => "webp",
+						_ => "img",
+					};
+
+					let filename = format!("clipboard.{}", ext);
+					let output_path = std::path::Path::new(&filename);
+					if std::fs::write(output_path, &image_data).is_err() {
+						retry_or_err(attempt, N_RETRIES, ClipboardError::WriteFailed)?;
+						continue;
+					}
+
+					let file_data =
+						std::fs::read(output_path).map_err(|_| ClipboardError::ReadFailed)?;
+					if let Some(image) = detect_image_type(&file_data) {
 						return Ok(ClipboardData::Image(image));
 					}
 
 					retry_or_err(attempt, N_RETRIES, ClipboardError::FormatNotAvailable)?;
 					continue;
 				}
-			}
 
-			Err(ClipboardError::FormatNotAvailable)
+				retry_or_err(attempt, N_RETRIES, ClipboardError::FormatNotAvailable)?;
+				continue;
+			}
 		}
+
+		Err(ClipboardError::FormatNotAvailable)
 	}
 
 	pub fn write_data(&self, data: &ClipboardData) -> Result<(), ClipboardError> {
