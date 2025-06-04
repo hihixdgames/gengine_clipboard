@@ -200,15 +200,9 @@ impl ClipboardHandle {
 						continue;
 					}
 
-					let mut len = 0;
-					loop {
-						let wchar = *(ptr.add(len * 2) as *const u16);
-						if wchar == 0 {
-							break;
-						}
-						len += 1;
-					}
-
+					let len = (0..)
+						.take_while(|&i| *(ptr.add(i * 2) as *const u16) != 0)
+						.count();
 					let slice = std::slice::from_raw_parts(ptr as *const u16, len);
 					let string = String::from_utf16(slice)
 						.map_err(|_| ClipboardError::Utf16ConversionFailed)?;
