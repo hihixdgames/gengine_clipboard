@@ -53,9 +53,7 @@ fn retry_or_err(
 	}
 }
 
-pub fn try_read_clipboard_bitmap_and_save<P: AsRef<std::path::Path>>(
-	output_path: P,
-) -> Result<(), ClipboardError> {
+pub fn try_read_clipboard_bitmap() -> Result<Vec<u8>, ClipboardError> {
 	unsafe {
 		let handle = GetClipboardData(CF_BITMAP).map_err(|_| ClipboardError::Empty)?;
 		if handle.0.is_null() {
@@ -124,24 +122,19 @@ pub fn try_read_clipboard_bitmap_and_save<P: AsRef<std::path::Path>>(
 			bfOffBits: (file_header_size + info_header_size) as u32,
 		};
 
-		let mut file = File::create(output_path).map_err(|_| ClipboardError::WriteFailed)?;
+		let mut bmp_data = Vec::with_capacity(file_size);
 
-		file.write_all(std::slice::from_raw_parts(
+		bmp_data.extend_from_slice(std::slice::from_raw_parts(
 			&file_header as *const _ as *const u8,
 			file_header_size,
-		))
-		.map_err(|_| ClipboardError::WriteFailed)?;
-
-		file.write_all(std::slice::from_raw_parts(
+		));
+		bmp_data.extend_from_slice(std::slice::from_raw_parts(
 			&bmi.bmiHeader as *const _ as *const u8,
 			info_header_size,
-		))
-		.map_err(|_| ClipboardError::WriteFailed)?;
+		));
+		bmp_data.extend_from_slice(&buffer);
 
-		file.write_all(&buffer)
-			.map_err(|_| ClipboardError::WriteFailed)?;
-
-		Ok(())
+		Ok(bmp_data)
 	}
 }
 
@@ -157,6 +150,41 @@ pub fn detect_image_type(data: &[u8]) -> Option<Image> {
 	} else {
 		None
 	}
+}
+
+fn extract_html_fragment(raw_html: &str) -> Option<&str> {
+	let start_tag = "StartFragment:";
+	let end_tag = "EndFragment:";
+
+	let start_pos = raw_html.find(start_tag)?;
+	let end_pos = raw_html.find(end_tag)?;
+
+	let start_num_line_end =
+		raw_html[start_pos + start_tag.len()..].find('\n')? + start_pos + start_tag.len();
+	let end_num_line_end =
+		raw_html[end_pos + end_tag.len()..].find('\n')? + end_pos + end_tag.len();
+
+	let start_num_str = &raw_html[start_pos + start_tag.len()..start_num_line_end].trim();
+	let end_num_str = &raw_html[end_pos + end_tag.len()..end_num_line_end].trim();
+
+	let start_idx = start_num_str.parse::<usize>().ok()?;
+	let end_idx = end_num_str.parse::<usize>().ok()?;
+
+	raw_html.get(start_idx..end_idx)
+}
+
+fn strip_html_tags(html: &str) -> String {
+	let mut output = String::new();
+	let mut in_tag = false;
+	for c in html.chars() {
+		match c {
+			'<' => in_tag = true,
+			'>' => in_tag = false,
+			_ if !in_tag => output.push(c),
+			_ => (),
+		}
+	}
+	output
 }
 
 pub struct ClipboardHandle;
@@ -179,6 +207,94 @@ impl ClipboardHandle {
 			let webp_format = RegisterClipboardFormatA(PCSTR(b"WEBP\0".as_ptr()));
 			let html_format = RegisterClipboardFormatA(PCSTR(b"HTML Format\0".as_ptr()));
 
+			fn try_extract_online_image_url(html: &str) -> Option<&str> {
+				html.find("src=\"").and_then(|start_idx| {
+					let rest = &html[start_idx + 5..];
+					rest.find('"').map(|end_idx| &rest[..end_idx])
+				})
+			}
+
+			if IsClipboardFormatAvailable(html_format).is_ok() {
+				let handle = GetClipboardData(html_format)
+					.map_err(|_| ClipboardError::FormatNotAvailable)?;
+				if !handle.0.is_null() {
+					let hglobal = HGLOBAL(handle.0);
+					let ptr = GlobalLock(hglobal);
+					if !ptr.is_null() {
+						let size = GlobalSize(hglobal);
+						let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+						let raw_html = String::from_utf8_lossy(slice).to_string();
+						let _ = GlobalUnlock(hglobal);
+
+						if let Some(url) = try_extract_online_image_url(&raw_html) {
+							if let Ok(resp) = reqwest::blocking::get(url) {
+								let content_type_opt = resp
+									.headers()
+									.get(reqwest::header::CONTENT_TYPE)
+									.and_then(|v| v.to_str().ok())
+									.map(|s| s.to_owned());
+
+								if let Some(content_type) = content_type_opt {
+									if content_type.starts_with("image/") {
+										let bytes = resp.bytes().map_err(|e| {
+											ClipboardError::Unknown(format!(
+												"Failed to read bytes: {}",
+												e
+											))
+										})?;
+										let data = bytes.to_vec();
+										if let Some(image) = detect_image_type(&data) {
+											return Ok(ClipboardData::Image(image));
+										}
+									} else if content_type.starts_with("text/html") {
+										let text = resp.text().map_err(|e| {
+											ClipboardError::Unknown(format!(
+												"Failed to read texts: {}",
+												e
+											))
+										})?;
+										return Ok(ClipboardData::Text(Text::HTML(text)));
+									}
+								}
+							}
+						}
+
+						if let Some(fragment_html) = extract_html_fragment(&raw_html) {
+							let plain_text = strip_html_tags(fragment_html);
+							return Ok(ClipboardData::Text(Text::Plain(
+								plain_text.trim().to_string(),
+							)));
+						} else {
+							let plain_text = strip_html_tags(&raw_html);
+							return Ok(ClipboardData::Text(Text::Plain(
+								plain_text.trim().to_string(),
+							)));
+						}
+					}
+				}
+			}
+
+			if format == CF_UNICODETEXT {
+				let handle =
+					GetClipboardData(format).map_err(|_| ClipboardError::FormatNotAvailable)?;
+				if handle.0.is_null() {
+					return Err(ClipboardError::Empty);
+				}
+				let hglobal = HGLOBAL(handle.0);
+				let ptr = GlobalLock(hglobal);
+				if ptr.is_null() {
+					return Err(ClipboardError::LockFailed);
+				}
+				let len = (0..)
+					.take_while(|&i| *(ptr.add(i * 2) as *const u16) != 0)
+					.count();
+				let slice = std::slice::from_raw_parts(ptr as *const u16, len);
+				let string =
+					String::from_utf16(slice).map_err(|_| ClipboardError::Utf16ConversionFailed)?;
+				let _ = GlobalUnlock(hglobal);
+				return Ok(ClipboardData::Text(Text::Plain(string)));
+			}
+
 			for attempt in 1..=N_RETRIES {
 				if IsClipboardFormatAvailable(format).is_err() {
 					retry_or_err(attempt, N_RETRIES, ClipboardError::FormatNotAvailable)?;
@@ -191,41 +307,6 @@ impl ClipboardHandle {
 					continue;
 				}
 				let handle = handle_result.unwrap();
-
-				if format == CF_UNICODETEXT {
-					let hglobal = HGLOBAL(handle.0);
-					let ptr = GlobalLock(hglobal);
-					if ptr.is_null() {
-						retry_or_err(attempt, N_RETRIES, ClipboardError::LockFailed)?;
-						continue;
-					}
-
-					let len = (0..)
-						.take_while(|&i| *(ptr.add(i * 2) as *const u16) != 0)
-						.count();
-					let slice = std::slice::from_raw_parts(ptr as *const u16, len);
-					let string = String::from_utf16(slice)
-						.map_err(|_| ClipboardError::Utf16ConversionFailed)?;
-
-					let _ = GlobalUnlock(hglobal);
-					return Ok(ClipboardData::Text(Text::Plain(string)));
-				}
-
-				if format == html_format {
-					let hglobal = HGLOBAL(handle.0);
-					let ptr = GlobalLock(hglobal);
-					if ptr.is_null() {
-						retry_or_err(attempt, N_RETRIES, ClipboardError::LockFailed)?;
-						continue;
-					}
-
-					let size = GlobalSize(hglobal);
-					let slice = std::slice::from_raw_parts(ptr as *const u8, size);
-					let html = String::from_utf8_lossy(slice).to_string();
-
-					let _ = GlobalUnlock(hglobal);
-					return Ok(ClipboardData::Text(Text::HTML(html)));
-				}
 
 				if format == CF_HDROP {
 					use std::{ffi::OsString, os::windows::ffi::OsStringExt};
@@ -247,27 +328,7 @@ impl ClipboardHandle {
 						buffer.truncate(len as usize);
 
 						if let Ok(path) = OsString::from_wide(&buffer).into_string() {
-							let path_obj = std::path::Path::new(&path);
-							if let Some(ext) = path_obj.extension().and_then(|e| e.to_str()) {
-								let ext_lower = ext.to_ascii_lowercase();
-
-								let file_data = match std::fs::read(path_obj) {
-									Ok(data) => data,
-									Err(_) => continue,
-								};
-
-								let output_filename = match ext_lower.as_str() {
-									"png" => "png.png",
-									"jpeg" | "jpg" => "jpeg.jpg",
-									"webp" => "webp.webp",
-									"gif" => "gif.gif",
-									_ => continue,
-								};
-
-								if std::fs::write(output_filename, &file_data).is_err() {
-									continue;
-								}
-
+							if let Ok(file_data) = std::fs::read(&path) {
 								if let Some(image) = detect_image_type(&file_data) {
 									let _ = GlobalUnlock(hglobal);
 									return Ok(ClipboardData::Image(image));
@@ -275,33 +336,41 @@ impl ClipboardHandle {
 							}
 						}
 					}
-
 					let _ = GlobalUnlock(hglobal);
 					retry_or_err(attempt, N_RETRIES, ClipboardError::FormatNotAvailable)?;
 					continue;
 				}
 
 				if format == CF_BITMAP {
-					let output_path = std::path::Path::new("bitmap.bmp");
-					match try_read_clipboard_bitmap_and_save(output_path) {
-						Ok(_) => {
-							let data = std::fs::read(output_path)
-								.map_err(|_| ClipboardError::ReadFailed)?;
-							return Ok(ClipboardData::Image(Image::BMP(data)));
+					match try_read_clipboard_bitmap() {
+						Ok(data) => {
+							if let Some(image) = detect_image_type(&data) {
+								return Ok(ClipboardData::Image(image));
+							} else {
+								retry_or_err(
+									attempt,
+									N_RETRIES,
+									ClipboardError::FormatNotAvailable,
+								)?;
+								continue;
+							}
 						}
 						Err(_) => {
-							retry_or_err(attempt, N_RETRIES, ClipboardError::WriteFailed)?;
+							retry_or_err(attempt, N_RETRIES, ClipboardError::LockFailed)?;
 							continue;
 						}
 					}
 				}
 
-				if format == png_format
-					|| format == image_png_format
-					|| format == jpeg_format
-					|| format == image_jpeg_format
-					|| format == gif_format
-					|| format == webp_format
+				if [
+					png_format,
+					image_png_format,
+					jpeg_format,
+					image_jpeg_format,
+					gif_format,
+					webp_format,
+				]
+				.contains(&format)
 				{
 					let hglobal = HGLOBAL(handle.0);
 					let ptr = GlobalLock(hglobal);
@@ -313,36 +382,16 @@ impl ClipboardHandle {
 					let size = GlobalSize(hglobal);
 					let slice = std::slice::from_raw_parts(ptr as *const u8, size);
 					let image_data = slice.to_vec();
-
 					let _ = GlobalUnlock(hglobal);
 
-					let ext = match detect_image_type(&image_data) {
-						Some(Image::PNG(_)) => "png",
-						Some(Image::JPEG(_)) => "jpg",
-						Some(Image::GIF(_)) => "gif",
-						Some(Image::WEBP(_)) => "webp",
-						_ => "img",
-					};
-
-					let filename = format!("clipboard.{}", ext);
-					let output_path = std::path::Path::new(&filename);
-					if std::fs::write(output_path, &image_data).is_err() {
-						retry_or_err(attempt, N_RETRIES, ClipboardError::WriteFailed)?;
-						continue;
-					}
-
-					let file_data =
-						std::fs::read(output_path).map_err(|_| ClipboardError::ReadFailed)?;
-					if let Some(image) = detect_image_type(&file_data) {
+					if let Some(image) = detect_image_type(&image_data) {
 						return Ok(ClipboardData::Image(image));
 					}
-
 					retry_or_err(attempt, N_RETRIES, ClipboardError::FormatNotAvailable)?;
 					continue;
 				}
 
 				retry_or_err(attempt, N_RETRIES, ClipboardError::FormatNotAvailable)?;
-				continue;
 			}
 		}
 

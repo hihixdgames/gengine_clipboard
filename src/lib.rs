@@ -32,8 +32,8 @@ trait InternalClipboard {
 
 // These two will later be flagged to only be active on windows
 // Later on we will have similar two lines for other platforms
-mod window;
-type Internal = window::WindowsClipboard;
+mod windows;
+type Internal = windows::WindowsClipboard;
 
 pub struct Clipboard {
 	internal: Internal,
