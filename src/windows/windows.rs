@@ -1,19 +1,16 @@
 use std::ffi::OsStr;
 use std::fmt;
-use std::fs::File;
-use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{
 	BI_RGB, BITMAP, BITMAPFILEHEADER, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC,
 	GetDIBits, GetObjectW, HBITMAP, RGBQUAD, ReleaseDC,
 };
 use windows::Win32::System::DataExchange::{
-	CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
-	IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatA, SetClipboardData,
+	CloseClipboard, EnumClipboardFormats, GetClipboardData, IsClipboardFormatAvailable,
+	OpenClipboard, RegisterClipboardFormatA, SetClipboardData,
 };
 use windows::Win32::System::Memory::*;
 use windows::core::PCSTR;
@@ -25,7 +22,6 @@ const CF_UNICODETEXT: u32 = 13;
 const CF_BITMAP: u32 = 2;
 const CF_DIB: u32 = 8;
 const BF_TYPE_BM: u16 = 0x4D42;
-const CF_HDROP: u32 = 15;
 
 const N_RETRIES: usize = 5;
 const TIME_BETWEEN_RETRIES: u64 = 1000;
@@ -83,22 +79,6 @@ pub fn try_read_clipboard_image_from_formats(
 		}
 	}
 	Ok(None)
-}
-
-fn retry_or_err(
-	attempt: usize,
-	max_retries: usize,
-	err: ClipboardError,
-) -> Result<(), ClipboardError> {
-	if attempt == max_retries {
-		Err(err)
-	} else {
-		std::thread::sleep(std::time::Duration::from_millis(TIME_BETWEEN_RETRIES));
-		unsafe {
-			OpenClipboard(None).map_err(|_| ClipboardError::OpenFailed)?;
-		}
-		Ok(())
-	}
 }
 
 pub fn try_read_clipboard_bitmap() -> Result<Vec<u8>, ClipboardError> {
@@ -200,6 +180,7 @@ pub fn detect_image_type(data: &[u8]) -> Option<Image> {
 	}
 }
 
+#[cfg(feature = "follow_html_img")]
 fn extract_html_fragment(raw_html: &str) -> Option<&str> {
 	let start_tag = "StartFragment:";
 	let end_tag = "EndFragment:";
@@ -221,6 +202,7 @@ fn extract_html_fragment(raw_html: &str) -> Option<&str> {
 	raw_html.get(start_idx..end_idx)
 }
 
+#[cfg(feature = "follow_html_img")]
 fn strip_html_tags(html: &str) -> String {
 	let mut output = String::new();
 	let mut in_tag = false;
@@ -235,6 +217,49 @@ fn strip_html_tags(html: &str) -> String {
 	output
 }
 
+#[cfg(feature = "follow_links")]
+fn try_image_from_link() -> Option<ClipboardData> {
+	unsafe {
+		let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
+		if handle.0.is_null() {
+			return None;
+		}
+		let hglobal = HGLOBAL(handle.0);
+		let ptr = GlobalLock(hglobal);
+		if ptr.is_null() {
+			return None;
+		}
+		let len = (0..)
+			.take_while(|&i| *(ptr.add(i * 2) as *const u16) != 0)
+			.count();
+		let slice = std::slice::from_raw_parts(ptr as *const u16, len);
+		let string = String::from_utf16(slice).ok()?;
+		let _ = GlobalUnlock(hglobal);
+
+		if string.starts_with("http://") || string.starts_with("https://") {
+			if let Ok(resp) = reqwest::blocking::get(&string) {
+				let content_type_opt = resp
+					.headers()
+					.get(reqwest::header::CONTENT_TYPE)
+					.and_then(|v| v.to_str().ok())
+					.map(|s| s.to_owned());
+
+				if let Some(content_type) = content_type_opt {
+					if content_type.starts_with("image/") {
+						if let Ok(bytes) = resp.bytes() {
+							let data = bytes.to_vec();
+							if let Some(image) = detect_image_type(&data) {
+								return Some(ClipboardData::Image(image));
+							}
+						}
+					}
+				}
+			}
+		}
+		None
+	}
+}
+
 pub struct ClipboardHandle;
 
 impl ClipboardHandle {
@@ -245,18 +270,6 @@ impl ClipboardHandle {
 		Ok(Self {})
 	}
 
-	pub fn read_data_with_retry(&self, format: u32) -> Result<ClipboardData, ClipboardError> {
-		for _ in 0..N_RETRIES {
-			match self.read_data(format) {
-				Ok(data) => return Ok(data),
-				Err(_) => {
-					std::thread::sleep(Duration::from_millis(TIME_BETWEEN_RETRIES));
-				}
-			}
-		}
-		self.read_data(format)
-	}
-
 	pub fn read_data(&self, format: u32) -> Result<ClipboardData, ClipboardError> {
 		unsafe {
 			let png_format = RegisterClipboardFormatA(PCSTR(b"PNG\0".as_ptr()));
@@ -265,7 +278,6 @@ impl ClipboardHandle {
 			let image_jpeg_format = RegisterClipboardFormatA(PCSTR(b"image/jpeg\0".as_ptr()));
 			let gif_format = RegisterClipboardFormatA(PCSTR(b"GIF\0".as_ptr()));
 			let webp_format = RegisterClipboardFormatA(PCSTR(b"WEBP\0".as_ptr()));
-			let html_format = RegisterClipboardFormatA(PCSTR(b"HTML Format\0".as_ptr()));
 
 			#[cfg(feature = "follow_html_img")]
 			fn try_extract_online_image_url(html: &str) -> Option<&str> {
@@ -392,7 +404,24 @@ impl ClipboardHandle {
 				return Ok(ClipboardData::Image(image));
 			}
 
-			Err(ClipboardError::FormatNotAvailable)
+			let handle =
+				GetClipboardData(CF_UNICODETEXT).map_err(|_| ClipboardError::FormatNotAvailable)?;
+			if handle.0.is_null() {
+				return Err(ClipboardError::Empty);
+			}
+			let hglobal = HGLOBAL(handle.0);
+			let ptr = GlobalLock(hglobal);
+			if ptr.is_null() {
+				return Err(ClipboardError::LockFailed);
+			}
+			let len = (0..)
+				.take_while(|&i| *(ptr.add(i * 2) as *const u16) != 0)
+				.count();
+			let slice = std::slice::from_raw_parts(ptr as *const u16, len);
+			let string =
+				String::from_utf16(slice).map_err(|_| ClipboardError::Utf16ConversionFailed)?;
+			let _ = GlobalUnlock(hglobal);
+			Ok(ClipboardData::Text(Text::Plain(string)))
 		}
 	}
 
@@ -532,27 +561,75 @@ fn spawn_thread<F: FnMut(crate::ClipboardEvent) + crate::WasmOrSend>(
 		for command in receiver {
 			match command {
 				ThreadCommand::GetData => {
-					let handle = match ClipboardHandle::new() {
-						Ok(h) => h,
-						Err(e) => {
-							callback(ClipboardEvent::FailedPasteHandling(e));
-							continue;
-						}
-					};
-
-					let mut format = 0u32;
 					let mut found = false;
+					for attempt in 0..N_RETRIES {
+						let handle = match ClipboardHandle::new() {
+							Ok(h) => h,
+							Err(e) => {
+								if attempt == N_RETRIES - 1 {
+									callback(ClipboardEvent::FailedPasteHandling(e));
+									break;
+								} else {
+									std::thread::sleep(std::time::Duration::from_millis(
+										TIME_BETWEEN_RETRIES,
+									));
+									continue;
+								}
+							}
+						};
 
-					loop {
-						format = unsafe { EnumClipboardFormats(format) };
-						if format == 0 {
-							break;
+						let mut format = 0u32;
+						let mut got_data = false;
+						while {
+							format = unsafe { EnumClipboardFormats(format) };
+							format != 0
+						} {
+							if let Ok(data) = handle.read_data(format) {
+								#[cfg(feature = "follow_links")]
+								{
+									if let ClipboardData::Text(Text::Plain(ref s)) = data {
+										if s.starts_with("http://") || s.starts_with("https://") {
+											if let Some(image_data) = try_image_from_link() {
+												callback(ClipboardEvent::Paste(image_data, None));
+												found = true;
+												got_data = true;
+												break;
+											} else {
+												callback(ClipboardEvent::Paste(data, None));
+												found = true;
+												got_data = true;
+												break;
+											}
+										}
+									}
+								}
+
+								#[cfg(not(feature = "follow_links"))]
+								{
+									callback(ClipboardEvent::Paste(data, None));
+									found = true;
+									got_data = true;
+									break;
+								}
+								#[cfg(feature = "follow_links")]
+								if !matches!(data, ClipboardData::Text(Text::Plain(ref s)) if s.starts_with("http://") || s.starts_with("https://"))
+								{
+									callback(ClipboardEvent::Paste(data, None));
+									found = true;
+									got_data = true;
+									break;
+								}
+							}
 						}
 
-						if let Ok(data) = handle.read_data(format) {
-							callback(ClipboardEvent::Paste(data, None));
-							found = true;
+						drop(handle);
+
+						if got_data {
 							break;
+						} else if attempt < N_RETRIES - 1 {
+							std::thread::sleep(std::time::Duration::from_millis(
+								TIME_BETWEEN_RETRIES,
+							));
 						}
 					}
 
