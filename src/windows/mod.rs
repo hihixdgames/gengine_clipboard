@@ -1,3 +1,5 @@
+#![allow(clippy::manual_c_str_literals)]
+
 use std::ffi::OsStr;
 use std::fmt;
 use std::os::windows::ffi::OsStrExt;
