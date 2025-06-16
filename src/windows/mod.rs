@@ -283,6 +283,7 @@ impl ClipboardHandle {
 			let image_jpeg_format = RegisterClipboardFormatA(PCSTR(b"image/jpeg\0".as_ptr()));
 			let gif_format = RegisterClipboardFormatA(PCSTR(b"GIF\0".as_ptr()));
 			let webp_format = RegisterClipboardFormatA(PCSTR(b"WEBP\0".as_ptr()));
+			#[cfg(feature = "follow_html_img")]
 			let html_format = RegisterClipboardFormatA(PCSTR(b"HTML Format\0".as_ptr()));
 
 			#[cfg(feature = "follow_html_img")]
