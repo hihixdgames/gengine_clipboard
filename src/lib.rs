@@ -32,8 +32,15 @@ trait InternalClipboard {
 
 // These two will later be flagged to only be active on windows
 // Later on we will have similar two lines for other platforms
-pub mod windows;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
 type Internal = windows::WindowsClipboard;
+
+#[cfg(target_arch = "wasm32")]
+mod wasm;
+#[cfg(target_arch = "wasm32")]
+type Internal = wasm::WasmClipboard;
 
 pub struct Clipboard {
 	internal: Internal,
