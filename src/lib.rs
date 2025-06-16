@@ -42,8 +42,6 @@ type Internal = windows::WindowsClipboard;
 
 #[cfg(target_arch = "wasm32")]
 type Internal = wasm::WasmClipboard;
-
-// Compile error for unsupported platforms
 pub struct Clipboard {
 	internal: Internal,
 }
