@@ -1,6 +1,12 @@
 mod clipboard_data;
 mod clipboard_error;
 
+#[cfg(target_arch = "wasm32")]
+mod wasm;
+
+#[cfg(all(target_os = "windows", feature = "windows_backend"))]
+pub mod windows;
+
 pub use clipboard_data::*;
 pub use clipboard_error::*;
 
@@ -30,11 +36,14 @@ trait InternalClipboard {
 	fn write(&self, data: ClipboardData);
 }
 
-// These two will later be flagged to only be active on windows
-// Later on we will have similar two lines for other platforms
-pub mod windows;
+// Choose the correct backend for each target
+#[cfg(all(target_os = "windows", feature = "windows_backend"))]
 type Internal = windows::WindowsClipboard;
 
+#[cfg(target_arch = "wasm32")]
+type Internal = wasm::WasmClipboard;
+
+// Compile error for unsupported platforms
 pub struct Clipboard {
 	internal: Internal,
 }
