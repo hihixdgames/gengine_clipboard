@@ -1,8 +1,8 @@
 #![allow(clippy::manual_c_str_literals)]
-
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::OsStringExt;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation::*;
@@ -15,6 +15,8 @@ use windows::Win32::System::DataExchange::{
 	OpenClipboard, RegisterClipboardFormatA, SetClipboardData,
 };
 use windows::Win32::System::Memory::*;
+use windows::Win32::UI::Shell::DragQueryFileW;
+use windows::Win32::UI::Shell::HDROP;
 use windows::core::PCSTR;
 
 use crate::clipboard_data::{ClipboardData, Image, Text};
@@ -23,6 +25,7 @@ use crate::{ClipboardError, ClipboardEvent, InternalClipboard};
 const CF_UNICODETEXT: u32 = 13;
 const CF_BITMAP: u32 = 2;
 const CF_DIB: u32 = 8;
+const CF_HDROP: u32 = 15;
 const BF_TYPE_BM: u16 = 0x4D42;
 
 const N_RETRIES: usize = 5;
@@ -406,6 +409,35 @@ impl ClipboardHandle {
 				CF_BITMAP,
 			]) {
 				return Ok(ClipboardData::Image(image));
+			}
+
+			if format == CF_HDROP {
+				let handle =
+					GetClipboardData(format).map_err(|_| ClipboardError::FormatNotAvailable)?;
+				if handle.0.is_null() {
+					return Err(ClipboardError::Empty);
+				}
+				let hglobal = HGLOBAL(handle.0);
+				let ptr = GlobalLock(hglobal);
+
+				let hdrop = HDROP(ptr);
+				let file_count = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
+
+				for i in 0..file_count {
+					let mut buffer = vec![0u16; 260];
+					let len = DragQueryFileW(hdrop, i, Some(&mut buffer[..]));
+					buffer.truncate(len as usize);
+
+					if let Ok(path) = OsString::from_wide(&buffer).into_string() {
+						if let Ok(file_data) = std::fs::read(&path) {
+							if let Some(image) = detect_image_type(&file_data) {
+								let _ = GlobalUnlock(hglobal);
+								return Ok(ClipboardData::Image(image));
+							}
+						}
+					}
+				}
+				let _ = GlobalUnlock(hglobal);
 			}
 
 			let handle =
