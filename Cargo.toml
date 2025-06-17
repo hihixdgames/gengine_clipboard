@@ -3,6 +3,12 @@ name = "gengine_clipboard"
 version = "0.0.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[workspace]
+members = ["run_wasm"]
+
 [dependencies]
 image = "0.25.6"
 reqwest = { version = "0.12.20", features = [
@@ -29,6 +35,8 @@ web-sys = { version = "0.3", features = [
 	"Window",
 	"Navigator",
 	"console",
+	"ClipboardEvent",
+	"Document",
 ] }
 js-sys = "0.3"
 

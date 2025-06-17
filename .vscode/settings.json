@@ -2,7 +2,4 @@
 	"editor.insertSpaces": false,
 	"rust-analyzer.check.command": "clippy",
 	"editor.formatOnSave": true,
-	"rust-analyzer.cargo.features": [
-		"windows_backend"
-	]
 }

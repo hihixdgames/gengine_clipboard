@@ -17,3 +17,12 @@ target/
 #.idea/
 
 Cargo.lock
+
+# Paste test files
+png.png
+jpeg.jpeg
+gif.gif
+webp.webp
+bmp.bmp
+ico.ico
+tiff.tiff

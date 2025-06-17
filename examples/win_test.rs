@@ -1,6 +1,14 @@
+#[cfg(target_os = "windows")]
 use gengine_clipboard::{Clipboard, ClipboardData, ClipboardEvent, Image, Text};
+#[cfg(target_os = "windows")]
 use std::sync::{Arc, Condvar, Mutex};
 
+#[cfg(not(target_os = "windows"))]
+fn main() {
+	panic!("only supported on windows")
+}
+
+#[cfg(target_os = "windows")]
 fn main() {
 	let pair = Arc::new((Mutex::new(None), Condvar::new()));
 	let pair_cb = Arc::clone(&pair);
