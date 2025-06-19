@@ -22,7 +22,7 @@ pub enum ClipboardEvent {
 }
 
 trait InternalClipboard {
-	fn new<F: FnMut(ClipboardEvent) + WasmOrSend>(callback: F) -> Self;
+	fn new<F: FnMut(ClipboardEvent) + WasmOrSend + 'static>(callback: F) -> Self;
 
 	#[cfg(not(target_arch = "wasm32"))]
 	fn get_data(&self);
@@ -45,7 +45,7 @@ pub struct Clipboard {
 }
 
 impl Clipboard {
-	pub fn new<F: FnMut(ClipboardEvent) + WasmOrSend>(callback: F) -> Self {
+	pub fn new<F: FnMut(ClipboardEvent) + WasmOrSend + 'static>(callback: F) -> Self {
 		Self {
 			internal: Internal::new(callback),
 		}

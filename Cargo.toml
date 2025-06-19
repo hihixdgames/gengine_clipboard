@@ -37,6 +37,19 @@ web-sys = { version = "0.3", features = [
 	"console",
 	"ClipboardEvent",
 	"Document",
+	"DataTransfer",
+	"CanvasRenderingContext2d",
+	"FileReader",
+	"HtmlCanvasElement",
+	"HtmlElement",
+	"HtmlImageElement",
+	"Url",
+	"EventTarget",
+	"DataTransfer",
+	"DataTransferItemList",
+	"DataTransferItem",
+	"File",
+	"Blob",
 ] }
 js-sys = "0.3"
 
