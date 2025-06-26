@@ -1,7 +1,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::{JsCast, prelude::*};
-use web_sys::{ClipboardEvent as WebClipboardEvent, FileReader, Response, window};
+use wasm_bindgen_futures::spawn_local;
+use web_sys::{Clipboard, ClipboardEvent as WebClipboardEvent, FileReader, Response, window};
 
 use crate::{ClipboardData, ClipboardEvent, InternalClipboard, Text, WasmOrSend};
 
@@ -202,5 +203,25 @@ impl InternalClipboard for WasmClipboard {
 		WasmClipboard
 	}
 
-	fn write(&self, _data: ClipboardData) {}
+	fn write(&self, data: ClipboardData) {
+		if let ClipboardData::Text(Text::Plain(text)) = data {
+			if let Some(win) = window() {
+				let navigator = win.navigator();
+				let clipboard: Clipboard = navigator.clipboard();
+
+				let promise = clipboard.write_text(&text);
+				let future = wasm_bindgen_futures::JsFuture::from(promise);
+
+				spawn_local(async move {
+					if let Err(err) = future.await {
+						web_sys::console::error_1(&err);
+					}
+				});
+			}
+		} else {
+			web_sys::console::warn_1(
+				&"Only plain text clipboard write is supported in WASM".into(),
+			);
+		}
+	}
 }
