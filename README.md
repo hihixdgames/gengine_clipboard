@@ -1,6 +1,8 @@
 # gengine_clipboard
 A multiplatform library for handling clipboard events.
 
+### Wasm currently does not support copying images
+
 # Wasm Development
 Remember to windows target with
 ```
