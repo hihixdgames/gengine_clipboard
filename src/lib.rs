@@ -35,6 +35,15 @@ mod windows;
 #[cfg(target_os = "windows")]
 type Internal = windows::WindowsClipboard;
 
+#[cfg(all(target_os = "linux", feature = "x11"))]
+mod x11;
+
+#[cfg(all(target_os = "linux", feature = "x11"))]
+type Internal = x11::X11Clipboard;
+
+#[cfg(all(target_os = "linux", feature = "x11"))]
+pub use x11::X11Clipboard;
+
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 #[cfg(target_arch = "wasm32")]
@@ -46,9 +55,8 @@ pub struct Clipboard {
 
 impl Clipboard {
 	pub fn new<F: FnMut(ClipboardEvent) + WasmOrSend + 'static>(callback: F) -> Self {
-		Self {
-			internal: Internal::new(callback),
-		}
+		let internal = Internal::new(callback);
+		Self { internal }
 	}
 
 	#[cfg(not(target_arch = "wasm32"))]
