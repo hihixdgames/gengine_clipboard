@@ -2,7 +2,5 @@
 	"editor.insertSpaces": false,
 	"rust-analyzer.check.command": "clippy",
 	"editor.formatOnSave": true,
-	"rust-analyzer.cargo.features": [
-		"x11"
-	] //comment out if not using x11
+	"rust-analyzer.cargo.features": []
 }

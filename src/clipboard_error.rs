@@ -10,5 +10,6 @@ pub enum ClipboardError {
 	Empty,
 	InUse,
 	WriteFailed,
+	UnsupportedMimeType,
 	Unknown(String),
 }

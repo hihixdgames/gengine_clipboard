@@ -4,6 +4,7 @@ use x11rb::{
 	rust_connection::RustConnection,
 };
 
+#[allow(unused)]
 pub struct AtomHolder {
 	/// "ATOM"
 	pub atom: Atom,
@@ -62,7 +63,7 @@ impl AtomHolder {
 	pub fn is_image(&self, type_atoms: &[u32]) -> Option<Atom> {
 		self.image
 			.iter()
-			.find(|a| type_atoms.contains(&(**a as u32)))
+			.find(|a| type_atoms.contains(&(**a)))
 			.copied()
 	}
 }

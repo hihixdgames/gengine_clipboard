@@ -4,12 +4,12 @@ use std::fs;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use winit::event_loop::EventLoopProxy;
 
 use crate::ClipboardEvent;
 
 use atoms::{AtomHolder, get_atom};
 use image::{EncodableLayout, GenericImageView};
+use raw_window_handle::HasDisplayHandle;
 use x11rb::CURRENT_TIME;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
@@ -258,7 +258,7 @@ impl ConnectionHandler {
 					}
 				};
 
-				if data.starts_with(&GIF87a) || data.starts_with(&GIF89a) {
+				return if data.starts_with(&GIF87a) || data.starts_with(&GIF89a) {
 					ClipboardData::Image(Image::GIF(data))
 				} else {
 					match image::load_from_memory(&data) {
@@ -272,8 +272,11 @@ impl ConnectionHandler {
 							ClipboardError::FormatNotAvailable
 						))),
 					}
-				}
-			} else if file_uri.starts_with("https://") || file_uri.starts_with("http://") {
+				};
+			}
+
+			#[cfg(feature = "follow_links")]
+			if file_uri.starts_with("https://") || file_uri.starts_with("http://") {
 				let data = match reqwest::blocking::get(file_uri) {
 					Ok(result) => match result.bytes() {
 						Ok(bytes) => bytes,
@@ -292,7 +295,7 @@ impl ConnectionHandler {
 					}
 				};
 
-				if data.starts_with(&GIF87a) || data.starts_with(&GIF89a) {
+				return if data.starts_with(&GIF87a) || data.starts_with(&GIF89a) {
 					ClipboardData::Image(Image::GIF(data.as_bytes().to_vec()))
 				} else {
 					match image::load_from_memory(&data) {
@@ -302,13 +305,15 @@ impl ConnectionHandler {
 							ClipboardError::FormatNotAvailable
 						))),
 					}
-				}
-			} else {
+				};
+			}
+
+			return {
 				ClipboardData::Text(crate::Text::Plain(format!(
 					"{:?}",
 					ClipboardError::FormatNotAvailable
 				)))
-			}
+			};
 		} else if type_atoms.contains(&self.atoms.text) {
 			self.convert_selection(self.atoms.text);
 			let data = self.get_property(self.atoms.text);
@@ -424,14 +429,18 @@ impl X11Clipboard {
 }
 
 impl InternalClipboard for X11Clipboard {
-	fn new<F: FnMut(ClipboardEvent) + crate::WasmOrSend + 'static>(callback: F) -> Self {
+	fn new<F: FnMut(ClipboardEvent) + crate::WasmOrSend + 'static>(
+		display_handle: &dyn HasDisplayHandle,
+		callback: F,
+	) -> Self {
 		X11Clipboard::new(callback)
 	}
 
-	fn get_data(&self) {
+	fn request_data(&self) {
 		let _ = self.sender.send(ThreadCommand::GetData);
 	}
 
+	#[cfg(feature = "unstable_write")]
 	fn write(&self, _data: ClipboardData) {
 		unimplemented!("Clipboard write not implemented yet.");
 	}

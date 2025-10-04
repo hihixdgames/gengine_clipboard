@@ -26,3 +26,5 @@ webp.webp
 bmp.bmp
 ico.ico
 tiff.tiff
+
+examples/sandbox.rs
