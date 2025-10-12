@@ -1,27 +1,21 @@
 mod wayland;
-mod x11;
+//mod x11;
 
 use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 
-use crate::{
-	InternalClipboard,
-	platform::{wayland::WaylandClipboard, x11::X11Clipboard},
-};
+use crate::{ClipboardConfig, InternalClipboard, platform::wayland::WaylandClipboard};
 
-pub enum Internal {
-	X11(X11Clipboard),
-	Wayland(WaylandClipboard),
+pub enum Internal<T: ClipboardConfig> {
+	//X11(X11Clipboard<T>),
+	Wayland(WaylandClipboard<T>),
 }
 
-pub struct Clipboard {
-	internal: Internal,
+pub struct Clipboard<T: ClipboardConfig> {
+	internal: Internal<T>,
 }
 
-impl InternalClipboard for Clipboard {
-	fn new<F: FnMut(crate::ClipboardEvent) + crate::WasmOrSend + 'static>(
-		display_handle: &dyn HasDisplayHandle,
-		callback: F,
-	) -> Self {
+impl<T: ClipboardConfig> InternalClipboard<T> for Clipboard<T> {
+	fn new(display_handle: &dyn HasDisplayHandle, behaviour: T) -> Self {
 		let handle = display_handle.display_handle().unwrap();
 		match handle.as_raw() {
 			RawDisplayHandle::Xlib(_) => {
@@ -31,18 +25,18 @@ impl InternalClipboard for Clipboard {
 			RawDisplayHandle::Wayland(_) => {
 				println!("Using wayland!");
 				Clipboard {
-					internal: Internal::Wayland(WaylandClipboard::new(display_handle, callback)),
+					internal: Internal::Wayland(WaylandClipboard::new(display_handle, behaviour)),
 				}
 			}
-			_ => unreachable!(),
+			_ => panic!(),
 		}
 	}
 
 	fn request_data(&self) {
 		match &self.internal {
-			Internal::X11(_) => {
-				todo!()
-			}
+			//Internal::X11(_) => {
+			//	todo!()
+			//}
 			Internal::Wayland(internal) => {
 				internal.request_data();
 			}

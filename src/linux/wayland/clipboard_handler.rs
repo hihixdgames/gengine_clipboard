@@ -1,13 +1,13 @@
 use sctk::{
 	data_device_manager::{
-		DataDeviceManagerState, ReadPipe,
+		DataDeviceManagerState,
 		data_device::{DataDevice, DataDeviceHandler},
 		data_offer::DataOfferHandler,
 		data_source::DataSourceHandler,
 	},
 	delegate_data_device, delegate_pointer, delegate_registry, delegate_seat, delegate_touch,
 	reexports::{
-		calloop::{LoopHandle, PostAction},
+		calloop::{self, LoopHandle},
 		calloop_wayland_source::WaylandSource,
 		client::{
 			Connection, Dispatch, Proxy,
@@ -28,16 +28,11 @@ use sctk::{
 		touch::{TouchData, TouchHandler},
 	},
 };
-use std::{
-	borrow::Cow,
-	collections::HashMap,
-	io::{ErrorKind, Read},
-	mem,
-	os::fd::AsRawFd,
-};
+use std::{collections::HashMap, thread::spawn};
 
 use crate::{
-	ClipboardCallback, ClipboardError, ClipboardEvent, platform::wayland::mime_type::MimeType,
+	ClipboardConfig, ClipboardError, ClipboardEvent, ClipboardEventSource,
+	platform::wayland::paste_data_access::WaylandPasteDataAccess,
 };
 
 #[derive(Default)]
@@ -64,26 +59,27 @@ impl Drop for SeatCapabilities {
 	}
 }
 
-pub struct ClipboardHandler<F: ClipboardCallback> {
-	callback: F,
+pub struct ClipboardHandler<T: ClipboardConfig> {
+	behaviour: T,
 	registry_state: RegistryState,
 	seat_state: SeatState,
 	data_device_manager_state: Option<DataDeviceManagerState>,
 	seats: HashMap<ObjectId, SeatCapabilities>,
 	latest_seat: Option<ObjectId>,
 	loop_handle: LoopHandle<'static, Self>,
+	even_count: usize,
 	pub exit: bool,
 }
 
-impl<F: ClipboardCallback> ClipboardHandler<F> {
+impl<T: ClipboardConfig> ClipboardHandler<T> {
 	pub fn create_and_insert(
 		backend: Backend,
 		loop_handle: LoopHandle<'static, Self>,
-		callback: F,
+		behaviour: T,
 	) -> Self {
 		let connection = Connection::from_backend(backend);
 		let (globals, event_queue) =
-			registry_queue_init::<ClipboardHandler<F>>(&connection).unwrap();
+			registry_queue_init::<ClipboardHandler<T>>(&connection).unwrap();
 		let queue_handle = &event_queue.handle();
 
 		let data_device_manager_state = DataDeviceManagerState::bind(&globals, queue_handle).ok();
@@ -106,20 +102,29 @@ impl<F: ClipboardCallback> ClipboardHandler<F> {
 			seats,
 			latest_seat: None,
 			exit: false,
-			callback,
+			behaviour,
 			loop_handle,
+			even_count: 0,
 		}
 	}
 
 	pub fn request_data(&mut self) {
-		(self.callback)(ClipboardEvent::StartedPasteHandling);
+		let source = ClipboardEventSource {
+			value: self.even_count,
+		};
+		self.even_count += 1;
+
+		self.behaviour
+			.callback(ClipboardEvent::StartedPasteHandling { source });
 
 		let latest = match self.latest_seat.as_ref() {
 			Some(latest) => latest,
 			_ => {
-				(self.callback)(ClipboardEvent::FailedPasteHandling(
-					ClipboardError::Unknown("No latest in wayland".to_string()),
-				));
+				self.behaviour
+					.callback(ClipboardEvent::FailedPasteHandling {
+						source,
+						error: ClipboardError::Unknown("No latest in wayland".to_string()),
+					});
 				return;
 			}
 		};
@@ -127,9 +132,13 @@ impl<F: ClipboardCallback> ClipboardHandler<F> {
 		let seat = match self.seats.get_mut(latest) {
 			Some(seat) => seat,
 			_ => {
-				(self.callback)(ClipboardEvent::FailedPasteHandling(
-					ClipboardError::Unknown("Latest seat not available in wayland".to_string()),
-				));
+				self.behaviour
+					.callback(ClipboardEvent::FailedPasteHandling {
+						source,
+						error: ClipboardError::Unknown(
+							"Latest seat not available in wayland".to_string(),
+						),
+					});
 				return;
 			}
 		};
@@ -138,98 +147,54 @@ impl<F: ClipboardCallback> ClipboardHandler<F> {
 			Some(data_device) => match data_device.data().selection_offer() {
 				Some(selection) => selection,
 				_ => {
-					(self.callback)(ClipboardEvent::FailedPasteHandling(ClipboardError::Empty));
+					self.behaviour
+						.callback(ClipboardEvent::FailedPasteHandling {
+							source,
+							error: ClipboardError::Empty,
+						});
 					return;
 				}
 			},
 			_ => {
-				(self.callback)(ClipboardEvent::FailedPasteHandling(
-					ClipboardError::Unknown("no data device in wayland".to_string()),
-				));
+				self.behaviour
+					.callback(ClipboardEvent::FailedPasteHandling {
+						source,
+						error: ClipboardError::Unknown("no data device in wayland".to_string()),
+					});
 				return;
 			}
 		};
 
-		let mime_type = match selection
-			.with_mime_types(|offers| MimeType::select(MimeType::DEFAULT_TARGETS, offers))
-		{
-			Some(mime_type) => mime_type,
-			_ => {
-				(self.callback)(ClipboardEvent::FailedPasteHandling(
-					ClipboardError::UnsupportedMimeType,
-				));
-				return;
-			}
-		};
+		let (sender, channel) = calloop::channel::channel();
+		let handle = spawn(move || {
+			let mime_types = selection.with_mime_types(|offers| offers.to_vec());
+			let mut data_access = WaylandPasteDataAccess::new(selection);
 
-		let read_pipe = match selection.receive(mime_type.as_str().to_string()) {
-			Ok(read_pipe) => read_pipe,
-			_ => {
-				(self.callback)(ClipboardEvent::FailedPasteHandling(
-					ClipboardError::Unknown(
-						"selection does not want to give after offering wayland".to_string(),
-					),
-				));
-				return;
-			}
-		};
+			let event: ClipboardEvent<T::ClipboardData> =
+				match T::resolve_paste_data(mime_types, &mut data_access) {
+					Ok(data) => ClipboardEvent::PasteResult { source, data },
+					Err(error) => ClipboardEvent::FailedPasteHandling { source, error },
+				};
 
-		if set_non_blocking(&read_pipe).is_err() {
-			(self.callback)(ClipboardEvent::FailedPasteHandling(
-				ClipboardError::Unknown("Failed t oset to non locking wayland".to_string()),
-			));
-			return;
-		}
+			let _ = sender.send(event);
+		});
 
-		let mut reader_buffer = [0; 4096];
-		let mut content = Vec::new();
+		// This is to make the closure FnMut
+		let mut handle = Some(handle);
 		let _ = self
 			.loop_handle
-			.insert_source(read_pipe, move |_, file, state| {
-				let file = unsafe { file.get_mut() };
-				loop {
-					match file.read(&mut reader_buffer) {
-						Ok(0) => {
-							if mime_type.is_string() {
-								let string =
-									if let Cow::Owned(string) = String::from_utf8_lossy(&content) {
-										string
-									} else {
-										// Not owned means that it is valid.
-										let mut content_copy = Vec::new();
-										// This is needed to make the closure safe
-										mem::swap(&mut content, &mut content_copy);
-										String::from_utf8(content_copy).unwrap()
-									};
-
-								// Maybe normalize like smithay clipboad?
-
-								(state.callback)(ClipboardEvent::Paste(
-									crate::ClipboardData::Text(crate::Text::Plain(string)),
-									None,
-								));
-								return PostAction::Remove;
-							}
-							println!("Not yet implemented");
-							todo!()
-						}
-						Ok(n) => content.extend_from_slice(&reader_buffer[..n]),
-						Err(err) if err.kind() == ErrorKind::WouldBlock => {
-							return PostAction::Continue;
-						}
-						Err(_) => {
-							(state.callback)(ClipboardEvent::FailedPasteHandling(
-								ClipboardError::Unknown("Failed to read file wayland".to_string()),
-							));
-							return PostAction::Remove;
-						}
+			.insert_source(channel, move |event, _, state| {
+				if let calloop::channel::Event::Msg(event) = event {
+					state.behaviour.callback(event);
+					if let Some(handle) = handle.take() {
+						let _ = handle.join();
 					};
 				}
 			});
 	}
 }
 
-impl<F: ClipboardCallback> SeatHandler for ClipboardHandler<F> {
+impl<T: ClipboardConfig> SeatHandler for ClipboardHandler<T> {
 	fn new_seat(
 		&mut self,
 		_conn: &Connection,
@@ -317,7 +282,7 @@ impl<F: ClipboardCallback> SeatHandler for ClipboardHandler<F> {
 	}
 }
 
-impl<F: ClipboardCallback> DataDeviceHandler for ClipboardHandler<F> {
+impl<T: ClipboardConfig> DataDeviceHandler for ClipboardHandler<T> {
 	fn drop_performed(
 		&mut self,
 		_conn: &Connection,
@@ -364,7 +329,7 @@ impl<F: ClipboardCallback> DataDeviceHandler for ClipboardHandler<F> {
 	}
 }
 
-impl<F: ClipboardCallback> DataOfferHandler for ClipboardHandler<F> {
+impl<T: ClipboardConfig> DataOfferHandler for ClipboardHandler<T> {
 	fn selected_action(
 		&mut self,
 		_conn: &Connection,
@@ -384,7 +349,7 @@ impl<F: ClipboardCallback> DataOfferHandler for ClipboardHandler<F> {
 	}
 }
 
-impl<F: ClipboardCallback> DataSourceHandler for ClipboardHandler<F> {
+impl<T: ClipboardConfig> DataSourceHandler for ClipboardHandler<T> {
 	fn send_request(
 		&mut self,
 		_conn: &Connection,
@@ -438,7 +403,7 @@ impl<F: ClipboardCallback> DataSourceHandler for ClipboardHandler<F> {
 	}
 }
 
-impl<F: ClipboardCallback> ProvidesRegistryState for ClipboardHandler<F> {
+impl<T: ClipboardConfig> ProvidesRegistryState for ClipboardHandler<T> {
 	registry_handlers![SeatState];
 
 	fn registry(&mut self) -> &mut RegistryState {
@@ -446,16 +411,16 @@ impl<F: ClipboardCallback> ProvidesRegistryState for ClipboardHandler<F> {
 	}
 }
 
-impl<F: ClipboardCallback> Dispatch<WlKeyboard, ObjectId, ClipboardHandler<F>>
-	for ClipboardHandler<F>
+impl<T: ClipboardConfig> Dispatch<WlKeyboard, ObjectId, ClipboardHandler<T>>
+	for ClipboardHandler<T>
 {
 	fn event(
-		state: &mut ClipboardHandler<F>,
+		state: &mut ClipboardHandler<T>,
 		_proxy: &WlKeyboard,
 		event: <WlKeyboard as Proxy>::Event,
 		data: &ObjectId,
 		_conn: &Connection,
-		_qhandle: &sctk::reexports::client::QueueHandle<ClipboardHandler<F>>,
+		_qhandle: &sctk::reexports::client::QueueHandle<ClipboardHandler<T>>,
 	) {
 		match event {
 			wl_keyboard::Event::Key { .. } | wl_keyboard::Event::Modifiers { .. } => {
@@ -466,7 +431,7 @@ impl<F: ClipboardCallback> Dispatch<WlKeyboard, ObjectId, ClipboardHandler<F>>
 	}
 }
 
-impl<F: ClipboardCallback> TouchHandler for ClipboardHandler<F> {
+impl<T: ClipboardConfig> TouchHandler for ClipboardHandler<T> {
 	fn down(
 		&mut self,
 		_conn: &Connection,
@@ -536,7 +501,7 @@ impl<F: ClipboardCallback> TouchHandler for ClipboardHandler<F> {
 	}
 }
 
-impl<F: ClipboardCallback> PointerHandler for ClipboardHandler<F> {
+impl<T: ClipboardConfig> PointerHandler for ClipboardHandler<T> {
 	fn pointer_frame(
 		&mut self,
 		_conn: &Connection,
@@ -557,28 +522,8 @@ impl<F: ClipboardCallback> PointerHandler for ClipboardHandler<F> {
 	}
 }
 
-delegate_seat!(@<F: ClipboardCallback> ClipboardHandler<F>);
-delegate_touch!(@<F: ClipboardCallback> ClipboardHandler<F>);
-delegate_pointer!(@<F: ClipboardCallback> ClipboardHandler<F>);
-delegate_data_device!(@<F: ClipboardCallback> ClipboardHandler<F>);
-delegate_registry!(@<F: ClipboardCallback> ClipboardHandler<F>);
-
-/// simthay-clipboard uses this so we trust that it is correct to use it
-/// with tools made by them.
-fn set_non_blocking(read_pipe: &ReadPipe) -> std::io::Result<()> {
-	let raw_fd = read_pipe.as_raw_fd();
-
-	let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
-
-	if flags < 0 {
-		return Err(std::io::Error::last_os_error());
-	}
-
-	let result = unsafe { libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-
-	if result < 0 {
-		return Err(std::io::Error::last_os_error());
-	}
-
-	Ok(())
-}
+delegate_seat!(@<T: ClipboardConfig> ClipboardHandler<T>);
+delegate_touch!(@<T: ClipboardConfig> ClipboardHandler<T>);
+delegate_pointer!(@<T: ClipboardConfig> ClipboardHandler<T>);
+delegate_data_device!(@<T: ClipboardConfig> ClipboardHandler<T>);
+delegate_registry!(@<T: ClipboardConfig> ClipboardHandler<T>);

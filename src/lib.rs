@@ -1,36 +1,75 @@
-mod clipboard_data;
 mod clipboard_error;
 
-pub use clipboard_data::*;
 pub use clipboard_error::*;
 use raw_window_handle::HasDisplayHandle;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub trait WasmOrSend: Send + 'static {}
-#[cfg(not(target_arch = "wasm32"))]
-impl<T: Send + 'static> WasmOrSend for T {}
-
-#[cfg(target_arch = "wasm32")]
-pub trait WasmOrSend {}
-#[cfg(target_arch = "wasm32")]
-impl<T> WasmOrSend for T {}
-
-trait ClipboardCallback: FnMut(ClipboardEvent) + WasmOrSend + 'static {}
-
-impl<F: FnMut(ClipboardEvent) + WasmOrSend + 'static> ClipboardCallback for F {}
-
-#[derive(Debug)]
-pub enum ClipboardEvent {
-	StartedPasteHandling,
-	FailedPasteHandling(ClipboardError),
-	Paste(ClipboardData, Option<ClipboardError>),
+pub trait PasteDataAccess {
+	fn get_data(&mut self, mime_type: &str) -> Result<Vec<u8>, ClipboardError>;
 }
 
-trait InternalClipboard {
-	fn new<F: FnMut(ClipboardEvent) + WasmOrSend + 'static>(
-		display_handle: &dyn HasDisplayHandle,
-		callback: F,
-	) -> Self;
+/// This indicates the source from which a ClipboardEvent originates from.
+///
+/// These can be compared to check if two events come from the same source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipboardEventSource {
+	pub(crate) value: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub trait ClipboardConfig: Send + Sized + 'static {
+	type ClipboardData: Send;
+
+	fn callback(&mut self, event: ClipboardEvent<Self::ClipboardData>);
+
+	fn resolve_paste_data(
+		mime_types: Vec<String>,
+		data_access: &mut impl PasteDataAccess,
+	) -> Result<Self::ClipboardData, ClipboardError>;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub enum ClipboardEvent<T: Send> {
+	StartedPasteHandling {
+		source: ClipboardEventSource,
+	},
+	FailedPasteHandling {
+		source: ClipboardEventSource,
+		error: ClipboardError,
+	},
+	PasteResult {
+		source: ClipboardEventSource,
+		data: T,
+	},
+}
+
+#[cfg(target_arch = "wasm32")]
+pub trait ClipboardConfig: Sized + 'static {
+	fn callback(&mut self, event: ClipboardEvent<Self::ClipboardData>);
+
+	fn resolve_paste_data(
+		mime_types: Vec<String>,
+		data_access: &mut impl PasteDataAccess,
+	) -> Result<Self::ClipboardData, ClipboardError>;
+}
+
+#[cfg(target_arch = "wasm32")]
+pub enum ClipboardEvent<T> {
+	StartedPasteHandling {
+		source: ClipboardEventSource,
+	},
+	FailedPasteHandling {
+		source: ClipboardEventSource,
+		error: ClipboardError,
+	},
+	PasteResult {
+		source: ClipboardEventSource,
+		data: T,
+	},
+}
+
+trait InternalClipboard<T: ClipboardConfig> {
+	fn new(display_handle: &dyn HasDisplayHandle, behaviour: T) -> Self;
 
 	#[cfg(not(target_arch = "wasm32"))]
 	fn request_data(&self);
@@ -44,16 +83,13 @@ trait InternalClipboard {
 #[cfg_attr(target_arch = "wasm32", path = "wasm.rs")]
 mod platform;
 
-pub struct Clipboard {
-	internal: platform::Clipboard,
+pub struct Clipboard<T: ClipboardConfig> {
+	internal: platform::Clipboard<T>,
 }
 
-impl Clipboard {
-	pub fn new<F: FnMut(ClipboardEvent) + WasmOrSend + 'static>(
-		display_handle: &dyn HasDisplayHandle,
-		callback: F,
-	) -> Self {
-		let internal = platform::Clipboard::new(display_handle, callback);
+impl<T: ClipboardConfig> Clipboard<T> {
+	pub fn new(display_handle: &dyn HasDisplayHandle, behaviour: T) -> Self {
+		let internal = platform::Clipboard::new(display_handle, behaviour);
 		Self { internal }
 	}
 
@@ -62,7 +98,7 @@ impl Clipboard {
 		self.internal.request_data();
 	}
 
-	#[cfg(feature = "unstable-write")]
+	#[cfg(feature = "unstable_write")]
 	pub fn write(&self, data: ClipboardData) {
 		self.internal.write(data);
 	}

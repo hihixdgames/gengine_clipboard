@@ -1,10 +1,11 @@
 use std::{
+	borrow::Cow,
 	num::NonZeroU32,
 	rc::Rc,
 	time::{Duration, Instant},
 };
 
-use gengine_clipboard::{Clipboard, ClipboardEvent};
+use gengine_clipboard::{Clipboard, ClipboardConfig, ClipboardEvent};
 use softbuffer::{Context, Surface};
 use winit::{
 	application::ApplicationHandler,
@@ -19,24 +20,61 @@ struct ContextSurface {
 	_surface: Surface<Rc<Window>, Rc<Window>>,
 }
 
+struct StringOnly {
+	proxy: EventLoopProxy<ClipboardEvent<String>>,
+}
+
+impl ClipboardConfig for StringOnly {
+	type ClipboardData = String;
+
+	fn callback(&mut self, event: ClipboardEvent<String>) {
+		let _ = self.proxy.send_event(event);
+	}
+
+	fn resolve_paste_data(
+		mime_types: Vec<String>,
+		data_access: &mut impl gengine_clipboard::PasteDataAccess,
+	) -> Result<Self::ClipboardData, gengine_clipboard::ClipboardError> {
+		let mime_type = if mime_types.contains(&String::from("text/plain;charset=utf-8")) {
+			"text/plain;charset=utf-8"
+		} else if mime_types.contains(&String::from("UTF8_STRING")) {
+			"UTF8_STRING"
+		} else if mime_types.contains(&String::from("text/plain")) {
+			"text/plain"
+		} else {
+			return Err(gengine_clipboard::ClipboardError::UnsupportedMimeType);
+		};
+
+		match data_access.get_data(mime_type) {
+			Ok(data) => {
+				if let Cow::Owned(string) = String::from_utf8_lossy(&data) {
+					Ok(string)
+				} else {
+					// Not owned means that it is valid.
+					Ok(String::from_utf8(data).unwrap())
+				}
+			}
+			Err(error) => Err(error),
+		}
+	}
+}
+
 struct ExampleWindow {
-	proxy: EventLoopProxy<ClipboardEvent>,
+	proxy: EventLoopProxy<ClipboardEvent<String>>,
 	context_surface: Option<ContextSurface>,
-	clipboard: Option<Clipboard>,
+	clipboard: Option<Clipboard<StringOnly>>,
 	ctrl_left: bool,
 	ctrl_right: bool,
 }
 
-impl ApplicationHandler<ClipboardEvent> for ExampleWindow {
+impl ApplicationHandler<ClipboardEvent<String>> for ExampleWindow {
 	fn resumed(&mut self, event_loop: &ActiveEventLoop) {
 		if self.context_surface.is_none() {
 			let window_attributes = Window::default_attributes().with_title("Clipboard Example");
 			let window = Rc::new(event_loop.create_window(window_attributes).unwrap());
 
 			let proxy = self.proxy.clone();
-			self.clipboard = Some(Clipboard::new(&window, move |event: ClipboardEvent| {
-				let _ = proxy.send_event(event);
-			}));
+			self.clipboard = Some(Clipboard::new(&window, StringOnly { proxy }));
 
 			let context = Context::new(window.clone()).unwrap();
 			let mut surface = Surface::new(&context, window.clone()).unwrap();
@@ -91,13 +129,13 @@ impl ApplicationHandler<ClipboardEvent> for ExampleWindow {
 		}
 	}
 
-	fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ClipboardEvent) {
+	fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ClipboardEvent<String>) {
 		println!("Got clipboard event: {event:?}");
 	}
 }
 
 fn main() {
-	let event_loop = EventLoop::<ClipboardEvent>::with_user_event()
+	let event_loop = EventLoop::<ClipboardEvent<String>>::with_user_event()
 		.build()
 		.unwrap();
 

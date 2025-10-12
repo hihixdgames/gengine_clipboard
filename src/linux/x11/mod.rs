@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use crate::ClipboardEvent;
+use crate::{ClipboardBehaviour, ClipboardEvent};
 
 use atoms::{AtomHolder, get_atom};
 use image::{EncodableLayout, GenericImageView};
@@ -428,12 +428,10 @@ impl X11Clipboard {
 	}
 }
 
-impl InternalClipboard for X11Clipboard {
-	fn new<F: FnMut(ClipboardEvent) + crate::WasmOrSend + 'static>(
-		display_handle: &dyn HasDisplayHandle,
-		callback: F,
-	) -> Self {
-		X11Clipboard::new(callback)
+impl<T: ClipboardBehaviour> InternalClipboard<T> for X11Clipboard {
+	fn new(display_handle: &dyn HasDisplayHandle, behaviour: T) -> Self {
+		todo!()
+		//X11Clipboard::new(callback)
 	}
 
 	fn request_data(&self) {
