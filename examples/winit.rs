@@ -20,14 +20,20 @@ struct ContextSurface {
 	_surface: Surface<Rc<Window>, Rc<Window>>,
 }
 
-struct StringOnly {
-	proxy: EventLoopProxy<ClipboardEvent<String>>,
+struct ExampleConfig {
+	proxy: EventLoopProxy<ClipboardEvent<ClipboardData>>,
 }
 
-impl ClipboardConfig for StringOnly {
-	type ClipboardData = String;
+#[derive(Debug)]
+enum ClipboardData {
+	Text(String),
+	Png(Vec<u8>),
+}
 
-	fn callback(&mut self, event: ClipboardEvent<String>) {
+impl ClipboardConfig for ExampleConfig {
+	type ClipboardData = ClipboardData;
+
+	fn callback(&mut self, event: ClipboardEvent<ClipboardData>) {
 		let _ = self.proxy.send_event(event);
 	}
 
@@ -35,7 +41,11 @@ impl ClipboardConfig for StringOnly {
 		mime_types: Vec<String>,
 		data_access: &mut impl gengine_clipboard::PasteDataAccess,
 	) -> Result<Self::ClipboardData, gengine_clipboard::ClipboardError> {
-		let mime_type = if mime_types.contains(&String::from("text/plain;charset=utf-8")) {
+		println!("Got mime types: {:?}", mime_types);
+
+		let mime_type = if mime_types.contains(&String::from("image/png")) {
+			"image/png"
+		} else if mime_types.contains(&String::from("text/plain;charset=utf-8")) {
 			"text/plain;charset=utf-8"
 		} else if mime_types.contains(&String::from("UTF8_STRING")) {
 			"UTF8_STRING"
@@ -47,11 +57,13 @@ impl ClipboardConfig for StringOnly {
 
 		match data_access.get_data(mime_type) {
 			Ok(data) => {
-				if let Cow::Owned(string) = String::from_utf8_lossy(&data) {
-					Ok(string)
+				if mime_type == "image/png" {
+					Ok(ClipboardData::Png(data))
+				} else if let Cow::Owned(string) = String::from_utf8_lossy(&data) {
+					Ok(ClipboardData::Text(string))
 				} else {
 					// Not owned means that it is valid.
-					Ok(String::from_utf8(data).unwrap())
+					Ok(ClipboardData::Text(String::from_utf8(data).unwrap()))
 				}
 			}
 			Err(error) => Err(error),
@@ -60,21 +72,21 @@ impl ClipboardConfig for StringOnly {
 }
 
 struct ExampleWindow {
-	proxy: EventLoopProxy<ClipboardEvent<String>>,
+	proxy: EventLoopProxy<ClipboardEvent<ClipboardData>>,
 	context_surface: Option<ContextSurface>,
-	clipboard: Option<Clipboard<StringOnly>>,
+	clipboard: Option<Clipboard<ExampleConfig>>,
 	ctrl_left: bool,
 	ctrl_right: bool,
 }
 
-impl ApplicationHandler<ClipboardEvent<String>> for ExampleWindow {
+impl ApplicationHandler<ClipboardEvent<ClipboardData>> for ExampleWindow {
 	fn resumed(&mut self, event_loop: &ActiveEventLoop) {
 		if self.context_surface.is_none() {
 			let window_attributes = Window::default_attributes().with_title("Clipboard Example");
 			let window = Rc::new(event_loop.create_window(window_attributes).unwrap());
 
 			let proxy = self.proxy.clone();
-			self.clipboard = Some(Clipboard::new(&window, StringOnly { proxy }));
+			self.clipboard = Some(Clipboard::new(&window, ExampleConfig { proxy }));
 
 			let context = Context::new(window.clone()).unwrap();
 			let mut surface = Surface::new(&context, window.clone()).unwrap();
@@ -129,13 +141,32 @@ impl ApplicationHandler<ClipboardEvent<String>> for ExampleWindow {
 		}
 	}
 
-	fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ClipboardEvent<String>) {
-		println!("Got clipboard event: {event:?}");
+	fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ClipboardEvent<ClipboardData>) {
+		match event {
+			ClipboardEvent::StartedPasteHandling { source } => {
+				println!("Started paste handling {:?}", source);
+			}
+			ClipboardEvent::FailedPasteHandling { source, error } => {
+				println!("Failed paste handling {:?} with error {:?}", source, error)
+			}
+			ClipboardEvent::PasteResult { source, data } => match data {
+				ClipboardData::Text(text) => {
+					println!("Reseived from {:?} the string: {}", source, text);
+				}
+				ClipboardData::Png(png) => {
+					println!(
+						"Received a PNG from {:?}. Saving it into image.png.",
+						source
+					);
+					std::fs::write("./image.png", png).expect("Failed to write into file")
+				}
+			},
+		}
 	}
 }
 
 fn main() {
-	let event_loop = EventLoop::<ClipboardEvent<String>>::with_user_event()
+	let event_loop = EventLoop::<ClipboardEvent<ClipboardData>>::with_user_event()
 		.build()
 		.unwrap();
 
