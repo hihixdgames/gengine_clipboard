@@ -5,7 +5,10 @@ use x11rb::{
 	connection::Connection,
 	protocol::{
 		Event,
-		xproto::{self, Atom, ConnectionExt, CreateWindowAux, Window, WindowClass, create_window},
+		xproto::{
+			self, Atom, ConnectionExt, CreateWindowAux, Property, Window, WindowClass,
+			create_window,
+		},
 	},
 	rust_connection::RustConnection,
 };
@@ -90,22 +93,26 @@ impl X11DataAcess {
 
 					let reply = self
 						.conn
-						.get_property(
-							false,
-							self.window,
-							event.property,
-							target,
-							data.len() as u32,
-							0,
-						)
+						.get_property(false, self.window, event.property, target, 0, 0)
 						.unwrap()
 						.reply()
 						.unwrap();
 
 					if reply.type_ == self.atoms.incr {
 						incr = true;
+
+						if let Some(Some(size)) = reply.value32().map(|mut values| values.next()) {
+							data.reserve(size as usize);
+						}
+
+						self.conn
+							.delete_property(self.window, event.property)
+							.unwrap()
+							.check()
+							.unwrap();
+
 						last_event = Instant::now();
-						todo!()
+						continue;
 					} else if reply.type_ != target {
 						return Err(ClipboardError::ForeignClipboardError);
 					}
@@ -117,8 +124,8 @@ impl X11DataAcess {
 							self.window,
 							event.property,
 							target,
-							data.len() as u32 / 4,
-							reply.bytes_after * 4,
+							0,
+							reply.bytes_after.div_ceil(4),
 						)
 						.unwrap()
 						.reply()
@@ -127,7 +134,39 @@ impl X11DataAcess {
 					data.extend_from_slice(&data_reply.value);
 					break;
 				}
-				Event::PropertyNotify(event) if incr => todo!(),
+				Event::PropertyNotify(event) if incr => {
+					if event.state != Property::NEW_VALUE {
+						continue;
+					}
+
+					let reply = self
+						.conn
+						.get_property(
+							true,
+							self.window,
+							self.property,
+							target,
+							0,
+							// There seem to be problems, if we first ask for empty property to get byte count.
+							// Therefore, we have the MAX value here.
+							u32::MAX,
+						)
+						.unwrap()
+						.reply()
+						.unwrap();
+
+					if reply.value.is_empty() {
+						self.conn
+							.delete_property(self.window, self.property)
+							.unwrap()
+							.check()
+							.unwrap();
+						break;
+					}
+
+					data.extend_from_slice(&reply.value);
+					last_event = Instant::now();
+				}
 				_ => {}
 			}
 		}
