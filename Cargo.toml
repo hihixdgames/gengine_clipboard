@@ -17,6 +17,12 @@ raw-window-handle = "0.6.2"
 x11rb = { version = "0.13.1" }
 sctk = { package = "smithay-client-toolkit", version = "0.20.0" }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = [
+	"Win32_System_DataExchange",
+	"Win32_System_Memory",
+] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -44,16 +50,6 @@ web-sys = { version = "0.3", features = [
 	"Headers",
 ] }
 
-[target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61.3", features = [
-	"Win32_Foundation",
-	"Win32_System_DataExchange",
-	"Win32_UI_WindowsAndMessaging",
-	"Win32_UI_Shell",
-	"Win32_System_Memory",
-	"Win32_Graphics_Gdi",
-	"Win32_System_LibraryLoader",
-] }
 
 [dev-dependencies]
 winit = "0.30.12"

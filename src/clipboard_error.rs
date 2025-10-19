@@ -3,6 +3,7 @@ pub enum ClipboardError {
 	Timeout,
 	/// The clipboard, with which this program is trying to communicate, fails to uphold the agreed behaviour.
 	ForeignClipboardError,
+	ClipboardDataUnavailable,
 	AllocationFailed,
 	SetFailed,
 	OpenFailed,

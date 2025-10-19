@@ -43,21 +43,33 @@ impl ClipboardConfig for ExampleConfig {
 	) -> Result<Self::ClipboardData, gengine_clipboard::ClipboardError> {
 		println!("Got mime types: {:?}", mime_types);
 
-		let mime_type = if mime_types.contains(&String::from("image/png")) {
-			"image/png"
+		let result = if mime_types.contains(&String::from("image/png")) {
+			data_access.get_data("image/png")
+		} else if mime_types.contains(&String::from("PNG")) {
+			data_access.get_data("PNG")
 		} else if mime_types.contains(&String::from("text/plain;charset=utf-8")) {
-			"text/plain;charset=utf-8"
+			data_access.get_data("text/plain;charset=utf-8")
 		} else if mime_types.contains(&String::from("UTF8_STRING")) {
-			"UTF8_STRING"
+			data_access.get_data("UTF8_STRING")
 		} else if mime_types.contains(&String::from("text/plain")) {
-			"text/plain"
+			data_access.get_data("text/plain")
+		} else if mime_types.contains(&String::from("CF_UNICODETEXT")) {
+			data_access.get_data("CF_UNICODETEXT").map(|data| {
+				let data: Vec<u16> = data
+					.chunks(2)
+					.map(|v| ((v[1] as u16) << 8) | v[0] as u16)
+					.collect();
+				String::from_utf16_lossy(&data).as_bytes().to_vec()
+			})
 		} else {
 			return Err(gengine_clipboard::ClipboardError::UnsupportedMimeType);
 		};
 
-		match data_access.get_data(mime_type) {
+		match result {
 			Ok(data) => {
-				if mime_type == "image/png" {
+				if mime_types.contains(&String::from("image/png"))
+					|| mime_types.contains(&String::from("PNG"))
+				{
 					Ok(ClipboardData::Png(data))
 				} else if let Cow::Owned(string) = String::from_utf8_lossy(&data) {
 					Ok(ClipboardData::Text(string))

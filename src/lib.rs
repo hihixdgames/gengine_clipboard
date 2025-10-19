@@ -69,7 +69,7 @@ pub enum ClipboardEvent<T> {
 }
 
 trait InternalClipboard<T: ClipboardConfig> {
-	fn new(display_handle: &dyn HasDisplayHandle, behaviour: T) -> Self;
+	fn new(display_handle: &dyn HasDisplayHandle, config: T) -> Self;
 
 	#[cfg(not(target_arch = "wasm32"))]
 	fn request_data(&self);
@@ -88,8 +88,8 @@ pub struct Clipboard<T: ClipboardConfig> {
 }
 
 impl<T: ClipboardConfig> Clipboard<T> {
-	pub fn new(display_handle: &dyn HasDisplayHandle, behaviour: T) -> Self {
-		let internal = platform::Clipboard::new(display_handle, behaviour);
+	pub fn new(display_handle: &dyn HasDisplayHandle, config: T) -> Self {
+		let internal = platform::Clipboard::new(display_handle, config);
 		Self { internal }
 	}
 
