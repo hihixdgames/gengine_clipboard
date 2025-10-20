@@ -1,7 +1,6 @@
-
-#[alias]
-#run-wasm = "run --release --target=x86_64-pc-windows-msvc --package run-wasm --"
+[alias]
+run-wasm = "run --release --target=x86_64-unknown-linux-gnu --package run-wasm --"
 
 # Comment away this part when not working with wasm
-#[build]
-#target = "wasm32-unknown-unknown"
+[build]
+target = "wasm32-unknown-unknown"

@@ -1,9 +1,11 @@
-use std::{
-	borrow::Cow,
-	num::NonZeroU32,
-	rc::Rc,
-	time::{Duration, Instant},
-};
+use std::{borrow::Cow, num::NonZeroU32, rc::Rc, time::Duration};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+use log::warn;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use gengine_clipboard::{Clipboard, ClipboardConfig, ClipboardEvent};
 use softbuffer::{Context, Surface};
@@ -41,7 +43,7 @@ impl ClipboardConfig for ExampleConfig {
 		mime_types: Vec<String>,
 		data_access: &mut impl gengine_clipboard::PasteDataAccess,
 	) -> Result<Self::ClipboardData, gengine_clipboard::ClipboardError> {
-		println!("Got mime types: {:?}", mime_types);
+		warn!("Got mime types: {:?}", mime_types);
 
 		let result = if mime_types.contains(&String::from("image/png")) {
 			data_access.get_data("image/png")
@@ -156,17 +158,17 @@ impl ApplicationHandler<ClipboardEvent<ClipboardData>> for ExampleWindow {
 	fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ClipboardEvent<ClipboardData>) {
 		match event {
 			ClipboardEvent::StartedPasteHandling { source } => {
-				println!("Started paste handling {:?}", source);
+				warn!("Started paste handling {:?}", source);
 			}
 			ClipboardEvent::FailedPasteHandling { source, error } => {
-				println!("Failed paste handling {:?} with error {:?}", source, error)
+				warn!("Failed paste handling {:?} with error {:?}", source, error)
 			}
 			ClipboardEvent::PasteResult { source, data } => match data {
 				ClipboardData::Text(text) => {
-					println!("Reseived from {:?} the string: {}", source, text);
+					warn!("Reseived from {:?} the string: {}", source, text);
 				}
 				ClipboardData::Png(png) => {
-					println!(
+					warn!(
 						"Received a PNG from {:?}. Saving it into image.png.",
 						source
 					);
@@ -178,6 +180,18 @@ impl ApplicationHandler<ClipboardEvent<ClipboardData>> for ExampleWindow {
 }
 
 fn main() {
+	#[cfg(target_arch = "wasm32")]
+	{
+		console_error_panic_hook::set_once();
+		let log_config = wasm_logger::Config::new(log::Level::Debug);
+		wasm_logger::init(log_config);
+	}
+	#[cfg(not(target_arch = "wasm32"))]
+	{
+		env_logger::builder()
+			.filter_level(log::LevelFilter::Debug)
+			.init();
+	}
 	let event_loop = EventLoop::<ClipboardEvent<ClipboardData>>::with_user_event()
 		.build()
 		.unwrap();

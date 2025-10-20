@@ -3,6 +3,18 @@ mod clipboard_error;
 pub use clipboard_error::*;
 use raw_window_handle::HasDisplayHandle;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub trait WasmOrSend: Send {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send> WasmOrSend for T {}
+
+#[cfg(target_arch = "wasm32")]
+pub trait WasmOrSend {}
+
+#[cfg(target_arch = "wasm32")]
+impl<T> WasmOrSend for T {}
+
 pub trait PasteDataAccess {
 	fn get_data(&mut self, mime_type: &str) -> Result<Vec<u8>, ClipboardError>;
 }
@@ -15,9 +27,8 @@ pub struct ClipboardEventSource {
 	pub(crate) value: usize,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub trait ClipboardConfig: Send + Sized + 'static {
-	type ClipboardData: Send;
+pub trait ClipboardConfig: WasmOrSend + Sized + 'static {
+	type ClipboardData: WasmOrSend;
 
 	fn callback(&mut self, event: ClipboardEvent<Self::ClipboardData>);
 
@@ -27,34 +38,8 @@ pub trait ClipboardConfig: Send + Sized + 'static {
 	) -> Result<Self::ClipboardData, ClipboardError>;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
-pub enum ClipboardEvent<T: Send> {
-	StartedPasteHandling {
-		source: ClipboardEventSource,
-	},
-	FailedPasteHandling {
-		source: ClipboardEventSource,
-		error: ClipboardError,
-	},
-	PasteResult {
-		source: ClipboardEventSource,
-		data: T,
-	},
-}
-
-#[cfg(target_arch = "wasm32")]
-pub trait ClipboardConfig: Sized + 'static {
-	fn callback(&mut self, event: ClipboardEvent<Self::ClipboardData>);
-
-	fn resolve_paste_data(
-		mime_types: Vec<String>,
-		data_access: &mut impl PasteDataAccess,
-	) -> Result<Self::ClipboardData, ClipboardError>;
-}
-
-#[cfg(target_arch = "wasm32")]
-pub enum ClipboardEvent<T> {
+pub enum ClipboardEvent<T: WasmOrSend> {
 	StartedPasteHandling {
 		source: ClipboardEventSource,
 	},
@@ -80,10 +65,14 @@ trait InternalClipboard<T: ClipboardConfig> {
 
 #[cfg_attr(target_os = "linux", path = "linux/mod.rs")]
 #[cfg_attr(target_os = "windows", path = "windows/mod.rs")]
-#[cfg_attr(target_arch = "wasm32", path = "wasm.rs")]
+#[cfg_attr(target_arch = "wasm32", path = "wasm/mod.rs")]
 mod platform;
 
 pub struct Clipboard<T: ClipboardConfig> {
+	#[cfg_attr(
+		all(target_arch = "wasm32", not(feature = "unstable_write")),
+		allow(dead_code)
+	)]
 	internal: platform::Clipboard<T>,
 }
 
