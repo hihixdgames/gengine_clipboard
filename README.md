@@ -1,17 +1,20 @@
-# gengine_clipboard
-A multiplatform library for handling clipboard events.
+# gengine_clipboard: a flexible multiplaform clipboard solution
 
-### Wasm currently does not support copying images
+gengine_clipboard allows users to write their own logic for choosing and processing clipboard data, while abstracting away platform-specific behavior.
 
-# Wasm Development
-Remember to windows target with
-```
-rustup target add wasm32-unknown-unknown
-```
-and to uncomment the wasm32-unknown-unknown target in .cargo/config for development tools know that we work on wasm.
+This library is being developed for an internal game engine at [hihi XD](https://hihixd.com/), and features are implemented as they are needed by games.
 
-To run the wasm example use:
-```
-cargo run-wasm --example wasm_test
-```
-and then open the link given in the terminal. It often makes sense to use a private/icognito window to prevent some cache problems.
+## Supported Features\Platforms
+|Feature   |Linux     |Windows   |Wasm (Web)|macOS     |
+|:--------:|:--------:|:--------:|:--------:|:--------:|
+|Read Data |✅        |✅        |⚠️        |❌        | 
+|Write Data|❌        | ❌       | ❌       |❌        | 
+
+✅ = Supported  
+❌ = Not Supported  
+⚠️ = You can't read clipboard content whenever. Instead you need to wait for events. 
+
+## Development todo
+- Mime type handling to unify platform differences
+- Proper error handling and miminize potential program crashes
+- writing data to the clipboard
