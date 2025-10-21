@@ -1,84 +1,76 @@
-mod chain;
+mod collector;
 mod pasta_data_access;
 
-use js_sys::{Array, Function, Uint8Array};
+use js_sys::Uint8Array;
 use raw_window_handle::HasDisplayHandle;
 use std::marker::PhantomData;
-use wasm_bindgen::{JsCast, JsValue, prelude::Closure};
-use web_sys::console;
+use wasm_bindgen::{JsCast, prelude::Closure};
+use web_sys::{Event, FileReader};
 
 use crate::{
-	ClipboardConfig, ClipboardError, ClipboardEvent, ClipboardEventSource, InternalClipboard,
-	platform::{chain::start, pasta_data_access::WasmDataAccess},
+	ClipboardConfig, ClipboardError, InternalClipboard,
+	platform::collector::{Collector, CollectorHandle},
 };
 
 pub struct Clipboard<T: ClipboardConfig> {
-	_callback: Closure<dyn FnMut(JsValue, JsValue)>,
-	_on_paste: Closure<dyn FnMut(web_sys::ClipboardEvent)>,
+	_handle: CollectorHandle,
 	phantom: PhantomData<T>,
 }
 
-fn console_log(text: &str) {
-	let js_value = JsValue::from_str(text);
-	console::log(&Array::of1(&js_value));
-}
-
 impl<T: ClipboardConfig> InternalClipboard<T> for Clipboard<T> {
-	fn new(_display_handle: &dyn HasDisplayHandle, mut config: T) -> Self {
-		console_log("hello");
-
-		let callback = Closure::<dyn FnMut(_, _)>::new(move |data: JsValue, source: JsValue| {
-			let source = source.as_f64().unwrap();
-			let source = ClipboardEventSource {
-				value: source as usize,
-			};
-
-			let mut cleaned = Vec::new();
-			let data: Array = data.dyn_into().unwrap();
-			let len = data.length() / 2;
-			for i in 0..len {
-				let name = data.get(i).as_string().unwrap();
-				let array: Uint8Array = data.get(i + 1).dyn_into().unwrap();
-				cleaned.push((name, array));
-			}
-
-			if cleaned.is_empty() {
-				config.callback(ClipboardEvent::FailedPasteHandling {
-					source,
-					error: ClipboardError::Empty,
-				});
-			} else {
-				let mut mime_types = Vec::new();
-				for (mime, _) in cleaned.iter() {
-					mime_types.push(mime.clone());
-				}
-
-				let mut data_access = WasmDataAccess::new(cleaned);
-				let event: ClipboardEvent<T::ClipboardData> =
-					match T::resolve_paste_data(mime_types, &mut data_access) {
-						Ok(data) => ClipboardEvent::PasteResult { source, data },
-						Err(error) => ClipboardEvent::FailedPasteHandling { source, error },
-					};
-
-				config.callback(event);
-			}
-		});
+	fn new(_display_handle: &dyn HasDisplayHandle, config: T) -> Self {
+		let (handle, collector) = Collector::new(config);
 
 		let mut n_events = 0;
-		let function: &Function = callback.as_ref().unchecked_ref();
-		let function = function.clone();
+
+		let inner_collector = collector.clone();
 		let on_paste = Closure::<dyn FnMut(_)>::new(move |event: web_sys::ClipboardEvent| {
 			let data = event.clipboard_data().unwrap();
 			let items = data.items();
-			let n_items = items.length();
-			for i in (0..n_items).rev() {
-				let item = items.get(i).unwrap();
-				let ty = item.type_();
-				let a = "Type: ".to_owned() + &ty;
-				console_log(&a);
+
+			collector.start_paste_handling(items.length() as usize, n_events);
+
+			if items.length() == 0 {
+				return collector.send_error(ClipboardError::Empty, n_events);
 			}
 
-			start(data, n_events, function.clone());
+			for i in 0..items.length() {
+				let item = items.get(i).unwrap();
+
+				let mime_type = item.type_();
+				match item.kind().as_str() {
+					"string" => {
+						let collector = inner_collector.clone();
+						let mime_type = mime_type.clone();
+						let callback = Closure::once_into_js(move |event: Event| {
+							let string = event.as_string().unwrap();
+							let array = Uint8Array::new_from_slice(string.as_bytes());
+							collector.insert_data(mime_type, array, n_events);
+						});
+
+						let _ = item.get_as_string(Some(callback.as_ref().unchecked_ref()));
+					}
+					"file" => {
+						let file = item.get_as_file().unwrap().unwrap();
+						let file_reader = FileReader::new().unwrap();
+						file_reader.read_as_array_buffer(&file).unwrap();
+
+						let collector = inner_collector.clone();
+						let mime_type = mime_type.clone();
+						let onload = Closure::once_into_js(move |event: Event| {
+							let file_reader: FileReader =
+								event.target().unwrap().dyn_into().unwrap();
+							let file = file_reader.result().unwrap();
+							let array = js_sys::Uint8Array::new(&file);
+							collector.insert_data(mime_type, array, n_events);
+						});
+
+						file_reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+					}
+					_ => unreachable!(),
+				}
+			}
+
 			n_events += 1;
 		});
 
@@ -86,10 +78,10 @@ impl<T: ClipboardConfig> InternalClipboard<T> for Clipboard<T> {
 		let document = window.document().unwrap();
 		let _ =
 			document.add_event_listener_with_callback("paste", on_paste.as_ref().unchecked_ref());
+		on_paste.forget();
 
 		Self {
-			_callback: callback,
-			_on_paste: on_paste,
+			_handle: handle,
 			phantom: PhantomData,
 		}
 	}

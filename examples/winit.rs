@@ -3,7 +3,6 @@ use std::{borrow::Cow, num::NonZeroU32, rc::Rc, time::Duration};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
-use log::warn;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
@@ -43,7 +42,7 @@ impl ClipboardConfig for ExampleConfig {
 		mime_types: Vec<String>,
 		data_access: &mut impl gengine_clipboard::PasteDataAccess,
 	) -> Result<Self::ClipboardData, gengine_clipboard::ClipboardError> {
-		warn!("Got mime types: {:?}", mime_types);
+		log::info!("Got mime types: {:?}", mime_types);
 
 		let result = if mime_types.contains(&String::from("image/png")) {
 			data_access.get_data("image/png")
@@ -158,21 +157,51 @@ impl ApplicationHandler<ClipboardEvent<ClipboardData>> for ExampleWindow {
 	fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ClipboardEvent<ClipboardData>) {
 		match event {
 			ClipboardEvent::StartedPasteHandling { source } => {
-				warn!("Started paste handling {:?}", source);
+				log::info!("Started paste handling {:?}", source);
 			}
 			ClipboardEvent::FailedPasteHandling { source, error } => {
-				warn!("Failed paste handling {:?} with error {:?}", source, error)
+				log::info!("Failed paste handling {:?} with error {:?}", source, error)
 			}
 			ClipboardEvent::PasteResult { source, data } => match data {
 				ClipboardData::Text(text) => {
-					warn!("Reseived from {:?} the string: {}", source, text);
+					log::info!("Reseived from {:?} the string: {}", source, text);
 				}
 				ClipboardData::Png(png) => {
-					warn!(
-						"Received a PNG from {:?}. Saving it into image.png.",
-						source
-					);
-					std::fs::write("./image.png", png).expect("Failed to write into file")
+					#[cfg(not(target_arch = "wasm32"))]
+					{
+						log::info!(
+							"Received a PNG from {:?}. Saving it into image.png.",
+							source
+						);
+						std::fs::write("./image.png", png).expect("Failed to write into file")
+					}
+					#[cfg(target_arch = "wasm32")]
+					{
+						use js_sys::Uint8Array;
+						use wasm_bindgen::JsCast;
+						use web_sys::{Blob, Url, window};
+
+						log::info!(
+							"Received a PNG from {:?}. Adding it to the document.",
+							source
+						);
+
+						let uint8_array = Uint8Array::new_from_slice(&png);
+						let array = js_sys::Array::new();
+						array.push(&uint8_array);
+						let blob = Blob::new_with_u8_array_sequence(&array).unwrap();
+						let url = Url::create_object_url_with_blob(&blob).unwrap();
+
+						let window = window().unwrap();
+						let document = window.document().unwrap();
+
+						let image: web_sys::HtmlImageElement =
+							document.create_element("img").unwrap().dyn_into().unwrap();
+						image.set_src(&url);
+
+						let body = document.body().unwrap();
+						body.append_child(&image.into()).unwrap();
+					}
 				}
 			},
 		}
@@ -183,13 +212,13 @@ fn main() {
 	#[cfg(target_arch = "wasm32")]
 	{
 		console_error_panic_hook::set_once();
-		let log_config = wasm_logger::Config::new(log::Level::Debug);
+		let log_config = wasm_logger::Config::new(log::Level::Info);
 		wasm_logger::init(log_config);
 	}
 	#[cfg(not(target_arch = "wasm32"))]
 	{
 		env_logger::builder()
-			.filter_level(log::LevelFilter::Debug)
+			.filter_level(log::LevelFilter::Info)
 			.init();
 	}
 	let event_loop = EventLoop::<ClipboardEvent<ClipboardData>>::with_user_event()
