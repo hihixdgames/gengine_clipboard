@@ -18,10 +18,11 @@ use crate::{
 
 const TIMEOUT_LIMIT: Duration = Duration::from_secs(2);
 
-pub struct WindowsDataAccess;
+pub struct WindowsDataAccess {
+	mime_types: Vec<String>,
+}
 
 impl WindowsDataAccess {
-	#[must_use = "Needs to get access to clipboard."]
 	pub fn new() -> Result<Self, ClipboardError> {
 		let start_time = Instant::now();
 		loop {
@@ -34,10 +35,14 @@ impl WindowsDataAccess {
 			}
 		}
 
-		Ok(WindowsDataAccess)
+		let mime_types = Self::get_mime_types();
+		Ok(WindowsDataAccess { mime_types })
 	}
 
-	pub fn get_mime_types(&self) -> Vec<String> {
+	/// # Warning
+	///
+	/// Only use when clipboard is opened.
+	fn get_mime_types() -> Vec<String> {
 		let n_types = unsafe { CountClipboardFormats() };
 
 		let mut formats: Vec<u32> = Vec::new();
@@ -63,6 +68,10 @@ impl WindowsDataAccess {
 }
 
 impl PasteDataAccess for WindowsDataAccess {
+	fn mime_types(&self) -> &[String] {
+		&self.mime_types
+	}
+
 	fn get_data(&mut self, mime_type: &str) -> Result<Vec<u8>, ClipboardError> {
 		let format = get_format_code(mime_type);
 		let handle = match unsafe { GetClipboardData(format) } {

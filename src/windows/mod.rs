@@ -2,11 +2,10 @@ mod format_conversion;
 mod paste_data_access;
 
 use crate::{
-	ClipboardConfig, ClipboardEvent, ClipboardEventSource, InternalClipboard,
+	ClipboardEvent, ClipboardEventSource, ClipboardHandler, InternalClipboard,
 	platform::paste_data_access::WindowsDataAccess,
 };
 use std::{
-	marker::PhantomData,
 	sync::mpsc::{self, Sender},
 	thread::{self, JoinHandle},
 };
@@ -16,14 +15,16 @@ enum ThreadCommand {
 	Exit,
 }
 
-pub struct Clipboard<T: ClipboardConfig> {
+pub struct Clipboard {
 	sender: Sender<ThreadCommand>,
 	join_handle: Option<JoinHandle<()>>,
-	phantom: PhantomData<T>,
 }
 
-impl<T: ClipboardConfig> InternalClipboard<T> for Clipboard<T> {
-	fn new(_display_handle: &dyn raw_window_handle::HasDisplayHandle, mut config: T) -> Self {
+impl InternalClipboard for Clipboard {
+	fn new<T: ClipboardHandler>(
+		_display_handle: &dyn raw_window_handle::HasDisplayHandle,
+		mut handler: T,
+	) -> Self {
 		let (sender, receiver) = mpsc::channel();
 		let join_handle = Some(thread::spawn(move || {
 			let mut event_conut = 0;
@@ -33,12 +34,12 @@ impl<T: ClipboardConfig> InternalClipboard<T> for Clipboard<T> {
 					ThreadCommand::GetData => {
 						let source = ClipboardEventSource { value: event_conut };
 						event_conut += 1;
-						config.callback(ClipboardEvent::StartedPasteHandling { source });
+						handler.handle_event(ClipboardEvent::StartedPasteHandling { source });
 
 						let mut data_access = match WindowsDataAccess::new() {
 							Ok(data_access) => data_access,
 							Err(error) => {
-								config.callback(ClipboardEvent::FailedPasteHandling {
+								handler.handle_event(ClipboardEvent::FailedPasteHandling {
 									source,
 									error,
 								});
@@ -46,15 +47,10 @@ impl<T: ClipboardConfig> InternalClipboard<T> for Clipboard<T> {
 							}
 						};
 
-						let mime_types: Vec<String> = data_access.get_mime_types();
-
-						let event: ClipboardEvent<T::ClipboardData> =
-							match T::resolve_paste_data(mime_types, &mut data_access) {
-								Ok(data) => ClipboardEvent::PasteResult { source, data },
-								Err(error) => ClipboardEvent::FailedPasteHandling { source, error },
-							};
-
-						config.callback(event);
+						handler.handle_event(ClipboardEvent::PasteResult {
+							data: &mut data_access,
+							source,
+						});
 					}
 					ThreadCommand::Exit => break,
 				}
@@ -64,7 +60,6 @@ impl<T: ClipboardConfig> InternalClipboard<T> for Clipboard<T> {
 		Self {
 			sender,
 			join_handle,
-			phantom: PhantomData,
 		}
 	}
 
@@ -78,7 +73,7 @@ impl<T: ClipboardConfig> InternalClipboard<T> for Clipboard<T> {
 	}
 }
 
-impl<T: ClipboardConfig> Drop for Clipboard<T> {
+impl Drop for Clipboard {
 	fn drop(&mut self) {
 		let _ = self.sender.send(ThreadCommand::Exit);
 		if let Some(handle) = self.join_handle.take() {
