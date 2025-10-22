@@ -1,69 +1,87 @@
-mod clipboard_data;
 mod clipboard_error;
 
-pub use clipboard_data::*;
 pub use clipboard_error::*;
+use raw_window_handle::HasDisplayHandle;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub trait WasmOrSend: Send + 'static {}
+pub trait WasmOrSend: Send {}
+
 #[cfg(not(target_arch = "wasm32"))]
-impl<T: Send + 'static> WasmOrSend for T {}
+impl<T: Send> WasmOrSend for T {}
 
 #[cfg(target_arch = "wasm32")]
 pub trait WasmOrSend {}
+
 #[cfg(target_arch = "wasm32")]
 impl<T> WasmOrSend for T {}
 
-#[derive(Debug)]
-pub enum ClipboardEvent {
-	StartedPasteHandling,
-	FailedPasteHandling(ClipboardError),
-	Paste(ClipboardData, Option<ClipboardError>),
+pub trait PasteDataAccess {
+	fn mime_types(&self) -> &[String];
+
+	fn get_data(&mut self, mime_type: &str) -> Result<Vec<u8>, ClipboardError>;
+}
+
+/// This indicates the source from which a ClipboardEvent originates from.
+///
+/// These can be compared to check if two events come from the same source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipboardEventSource {
+	pub(crate) value: usize,
+}
+
+pub enum ClipboardEvent<'a> {
+	StartedPasteHandling {
+		source: ClipboardEventSource,
+	},
+	FailedPasteHandling {
+		error: ClipboardError,
+		source: ClipboardEventSource,
+	},
+	PasteResult {
+		data: &'a mut dyn PasteDataAccess,
+		source: ClipboardEventSource,
+	},
+}
+
+pub trait ClipboardHandler: WasmOrSend + Sized + 'static {
+	fn handle_event(&mut self, event: ClipboardEvent<'_>);
 }
 
 trait InternalClipboard {
-	fn new<F: FnMut(ClipboardEvent) + WasmOrSend + 'static>(callback: F) -> Self;
+	fn new<T: ClipboardHandler>(display_handle: &dyn HasDisplayHandle, handler: T) -> Self;
 
 	#[cfg(not(target_arch = "wasm32"))]
-	fn get_data(&self);
+	fn request_data(&self);
 
+	#[cfg(feature = "unstable_write")]
 	fn write(&self, data: ClipboardData);
 }
 
-#[cfg(target_os = "windows")]
-mod windows;
-#[cfg(target_os = "windows")]
-type Internal = windows::WindowsClipboard;
-
-#[cfg(all(target_os = "linux", feature = "x11"))]
-mod x11;
-
-#[cfg(all(target_os = "linux", feature = "x11"))]
-type Internal = x11::X11Clipboard;
-
-#[cfg(all(target_os = "linux", feature = "x11"))]
-pub use x11::X11Clipboard;
-
-#[cfg(target_arch = "wasm32")]
-mod wasm;
-#[cfg(target_arch = "wasm32")]
-type Internal = wasm::WasmClipboard;
+#[cfg_attr(target_os = "linux", path = "linux/mod.rs")]
+#[cfg_attr(target_os = "windows", path = "windows/mod.rs")]
+#[cfg_attr(target_arch = "wasm32", path = "wasm/mod.rs")]
+mod platform;
 
 pub struct Clipboard {
-	internal: Internal,
+	#[cfg_attr(
+		all(target_arch = "wasm32", not(feature = "unstable_write")),
+		allow(dead_code)
+	)]
+	internal: platform::Clipboard,
 }
 
 impl Clipboard {
-	pub fn new<F: FnMut(ClipboardEvent) + WasmOrSend + 'static>(callback: F) -> Self {
-		let internal = Internal::new(callback);
+	pub fn new<T: ClipboardHandler>(display_handle: &dyn HasDisplayHandle, handler: T) -> Self {
+		let internal = platform::Clipboard::new(display_handle, handler);
 		Self { internal }
 	}
 
 	#[cfg(not(target_arch = "wasm32"))]
-	pub fn get_data(&self) {
-		self.internal.get_data();
+	pub fn request_data(&self) {
+		self.internal.request_data();
 	}
 
+	#[cfg(feature = "unstable_write")]
 	pub fn write(&self, data: ClipboardData) {
 		self.internal.write(data);
 	}
