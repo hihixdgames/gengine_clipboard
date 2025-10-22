@@ -7,7 +7,7 @@ use sctk::{
 	},
 	delegate_data_device, delegate_pointer, delegate_registry, delegate_seat, delegate_touch,
 	reexports::{
-		calloop::{self, LoopHandle},
+		calloop::LoopHandle,
 		calloop_wayland_source::WaylandSource,
 		client::{
 			Connection, Dispatch, Proxy,
@@ -28,11 +28,13 @@ use sctk::{
 		touch::{TouchData, TouchHandler},
 	},
 };
-use std::{collections::HashMap, thread::spawn};
+use std::collections::HashMap;
 
 use crate::{
-	ClipboardConfig, ClipboardError, ClipboardEvent, ClipboardEventSource,
-	platform::wayland::paste_data_access::WaylandPasteDataAccess,
+	ClipboardError, ClipboardEventSource, ClipboardHandler,
+	platform::wayland::{
+		even_handler_thread::HandlerThread, paste_data_access::WaylandPasteDataAccess,
+	},
 };
 
 #[derive(Default)]
@@ -59,27 +61,25 @@ impl Drop for SeatCapabilities {
 	}
 }
 
-pub struct ClipboardHandler<T: ClipboardConfig> {
-	behaviour: T,
+pub struct WaylandHandler {
 	registry_state: RegistryState,
 	seat_state: SeatState,
 	data_device_manager_state: Option<DataDeviceManagerState>,
 	seats: HashMap<ObjectId, SeatCapabilities>,
 	latest_seat: Option<ObjectId>,
-	loop_handle: LoopHandle<'static, Self>,
 	even_count: usize,
+	handler: HandlerThread,
 	pub exit: bool,
 }
 
-impl<T: ClipboardConfig> ClipboardHandler<T> {
-	pub fn create_and_insert(
+impl WaylandHandler {
+	pub fn create_and_insert<T: ClipboardHandler>(
 		backend: Backend,
 		loop_handle: LoopHandle<'static, Self>,
-		behaviour: T,
+		handler: T,
 	) -> Self {
 		let connection = Connection::from_backend(backend);
-		let (globals, event_queue) =
-			registry_queue_init::<ClipboardHandler<T>>(&connection).unwrap();
+		let (globals, event_queue) = registry_queue_init::<WaylandHandler>(&connection).unwrap();
 		let queue_handle = &event_queue.handle();
 
 		let data_device_manager_state = DataDeviceManagerState::bind(&globals, queue_handle).ok();
@@ -92,8 +92,10 @@ impl<T: ClipboardConfig> ClipboardHandler<T> {
 		}
 
 		WaylandSource::new(connection, event_queue)
-			.insert(loop_handle.clone())
+			.insert(loop_handle)
 			.unwrap();
+
+		let handler = HandlerThread::new(handler);
 
 		Self {
 			registry_state: RegistryState::new(&globals),
@@ -102,8 +104,7 @@ impl<T: ClipboardConfig> ClipboardHandler<T> {
 			seats,
 			latest_seat: None,
 			exit: false,
-			behaviour,
-			loop_handle,
+			handler,
 			even_count: 0,
 		}
 	}
@@ -114,17 +115,15 @@ impl<T: ClipboardConfig> ClipboardHandler<T> {
 		};
 		self.even_count += 1;
 
-		self.behaviour
-			.callback(ClipboardEvent::StartedPasteHandling { source });
+		self.handler.started_paste_handling(source);
 
 		let latest = match self.latest_seat.as_ref() {
 			Some(latest) => latest,
 			_ => {
-				self.behaviour
-					.callback(ClipboardEvent::FailedPasteHandling {
-						source,
-						error: ClipboardError::Unknown("No latest in wayland".to_string()),
-					});
+				self.handler.failed_paste_handling(
+					ClipboardError::Unknown("No latest in wayland".to_string()),
+					source,
+				);
 				return;
 			}
 		};
@@ -132,13 +131,10 @@ impl<T: ClipboardConfig> ClipboardHandler<T> {
 		let seat = match self.seats.get_mut(latest) {
 			Some(seat) => seat,
 			_ => {
-				self.behaviour
-					.callback(ClipboardEvent::FailedPasteHandling {
-						source,
-						error: ClipboardError::Unknown(
-							"Latest seat not available in wayland".to_string(),
-						),
-					});
+				self.handler.failed_paste_handling(
+					ClipboardError::Unknown("Latest seat not available in wayland".to_string()),
+					source,
+				);
 				return;
 			}
 		};
@@ -147,54 +143,26 @@ impl<T: ClipboardConfig> ClipboardHandler<T> {
 			Some(data_device) => match data_device.data().selection_offer() {
 				Some(selection) => selection,
 				_ => {
-					self.behaviour
-						.callback(ClipboardEvent::FailedPasteHandling {
-							source,
-							error: ClipboardError::Empty,
-						});
+					self.handler
+						.failed_paste_handling(ClipboardError::Empty, source);
 					return;
 				}
 			},
 			_ => {
-				self.behaviour
-					.callback(ClipboardEvent::FailedPasteHandling {
-						source,
-						error: ClipboardError::Unknown("no data device in wayland".to_string()),
-					});
+				self.handler.failed_paste_handling(
+					ClipboardError::Unknown("no data device in wayland".to_string()),
+					source,
+				);
 				return;
 			}
 		};
 
-		let (sender, channel) = calloop::channel::channel();
-		let handle = spawn(move || {
-			let mime_types = selection.with_mime_types(|offers| offers.to_vec());
-			let mut data_access = WaylandPasteDataAccess::new(selection);
-
-			let event: ClipboardEvent<T::ClipboardData> =
-				match T::resolve_paste_data(mime_types, &mut data_access) {
-					Ok(data) => ClipboardEvent::PasteResult { source, data },
-					Err(error) => ClipboardEvent::FailedPasteHandling { source, error },
-				};
-
-			let _ = sender.send(event);
-		});
-
-		// This is to make the closure FnMut
-		let mut handle = Some(handle);
-		let _ = self
-			.loop_handle
-			.insert_source(channel, move |event, _, state| {
-				if let calloop::channel::Event::Msg(event) = event {
-					state.behaviour.callback(event);
-					if let Some(handle) = handle.take() {
-						let _ = handle.join();
-					};
-				}
-			});
+		let data = WaylandPasteDataAccess::new(selection);
+		self.handler.paste_result(data, source);
 	}
 }
 
-impl<T: ClipboardConfig> SeatHandler for ClipboardHandler<T> {
+impl SeatHandler for WaylandHandler {
 	fn new_seat(
 		&mut self,
 		_conn: &Connection,
@@ -282,7 +250,7 @@ impl<T: ClipboardConfig> SeatHandler for ClipboardHandler<T> {
 	}
 }
 
-impl<T: ClipboardConfig> DataDeviceHandler for ClipboardHandler<T> {
+impl DataDeviceHandler for WaylandHandler {
 	fn drop_performed(
 		&mut self,
 		_conn: &Connection,
@@ -329,7 +297,7 @@ impl<T: ClipboardConfig> DataDeviceHandler for ClipboardHandler<T> {
 	}
 }
 
-impl<T: ClipboardConfig> DataOfferHandler for ClipboardHandler<T> {
+impl DataOfferHandler for WaylandHandler {
 	fn selected_action(
 		&mut self,
 		_conn: &Connection,
@@ -349,7 +317,7 @@ impl<T: ClipboardConfig> DataOfferHandler for ClipboardHandler<T> {
 	}
 }
 
-impl<T: ClipboardConfig> DataSourceHandler for ClipboardHandler<T> {
+impl DataSourceHandler for WaylandHandler {
 	fn send_request(
 		&mut self,
 		_conn: &Connection,
@@ -403,7 +371,7 @@ impl<T: ClipboardConfig> DataSourceHandler for ClipboardHandler<T> {
 	}
 }
 
-impl<T: ClipboardConfig> ProvidesRegistryState for ClipboardHandler<T> {
+impl ProvidesRegistryState for WaylandHandler {
 	registry_handlers![SeatState];
 
 	fn registry(&mut self) -> &mut RegistryState {
@@ -411,16 +379,14 @@ impl<T: ClipboardConfig> ProvidesRegistryState for ClipboardHandler<T> {
 	}
 }
 
-impl<T: ClipboardConfig> Dispatch<WlKeyboard, ObjectId, ClipboardHandler<T>>
-	for ClipboardHandler<T>
-{
+impl Dispatch<WlKeyboard, ObjectId, WaylandHandler> for WaylandHandler {
 	fn event(
-		state: &mut ClipboardHandler<T>,
+		state: &mut WaylandHandler,
 		_proxy: &WlKeyboard,
 		event: <WlKeyboard as Proxy>::Event,
 		data: &ObjectId,
 		_conn: &Connection,
-		_qhandle: &sctk::reexports::client::QueueHandle<ClipboardHandler<T>>,
+		_qhandle: &sctk::reexports::client::QueueHandle<WaylandHandler>,
 	) {
 		match event {
 			wl_keyboard::Event::Key { .. } | wl_keyboard::Event::Modifiers { .. } => {
@@ -431,7 +397,7 @@ impl<T: ClipboardConfig> Dispatch<WlKeyboard, ObjectId, ClipboardHandler<T>>
 	}
 }
 
-impl<T: ClipboardConfig> TouchHandler for ClipboardHandler<T> {
+impl TouchHandler for WaylandHandler {
 	fn down(
 		&mut self,
 		_conn: &Connection,
@@ -501,7 +467,7 @@ impl<T: ClipboardConfig> TouchHandler for ClipboardHandler<T> {
 	}
 }
 
-impl<T: ClipboardConfig> PointerHandler for ClipboardHandler<T> {
+impl PointerHandler for WaylandHandler {
 	fn pointer_frame(
 		&mut self,
 		_conn: &Connection,
@@ -522,8 +488,8 @@ impl<T: ClipboardConfig> PointerHandler for ClipboardHandler<T> {
 	}
 }
 
-delegate_seat!(@<T: ClipboardConfig> ClipboardHandler<T>);
-delegate_touch!(@<T: ClipboardConfig> ClipboardHandler<T>);
-delegate_pointer!(@<T: ClipboardConfig> ClipboardHandler<T>);
-delegate_data_device!(@<T: ClipboardConfig> ClipboardHandler<T>);
-delegate_registry!(@<T: ClipboardConfig> ClipboardHandler<T>);
+delegate_seat!(WaylandHandler);
+delegate_touch!(WaylandHandler);
+delegate_pointer!(WaylandHandler);
+delegate_data_device!(WaylandHandler);
+delegate_registry!(WaylandHandler);

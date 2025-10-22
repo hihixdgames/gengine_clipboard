@@ -16,6 +16,8 @@ pub trait WasmOrSend {}
 impl<T> WasmOrSend for T {}
 
 pub trait PasteDataAccess {
+	fn mime_types(&self) -> &[String];
+
 	fn get_data(&mut self, mime_type: &str) -> Result<Vec<u8>, ClipboardError>;
 }
 
@@ -27,34 +29,26 @@ pub struct ClipboardEventSource {
 	pub(crate) value: usize,
 }
 
-pub trait ClipboardConfig: WasmOrSend + Sized + 'static {
-	type ClipboardData: WasmOrSend;
-
-	fn callback(&mut self, event: ClipboardEvent<Self::ClipboardData>);
-
-	fn resolve_paste_data(
-		mime_types: Vec<String>,
-		data_access: &mut impl PasteDataAccess,
-	) -> Result<Self::ClipboardData, ClipboardError>;
-}
-
-#[derive(Debug)]
-pub enum ClipboardEvent<T: WasmOrSend> {
+pub enum ClipboardEvent<'a> {
 	StartedPasteHandling {
 		source: ClipboardEventSource,
 	},
 	FailedPasteHandling {
-		source: ClipboardEventSource,
 		error: ClipboardError,
+		source: ClipboardEventSource,
 	},
 	PasteResult {
+		data: &'a mut dyn PasteDataAccess,
 		source: ClipboardEventSource,
-		data: T,
 	},
 }
 
-trait InternalClipboard<T: ClipboardConfig> {
-	fn new(display_handle: &dyn HasDisplayHandle, config: T) -> Self;
+pub trait ClipboardHandler: WasmOrSend + Sized + 'static {
+	fn handle_event(&mut self, event: ClipboardEvent<'_>);
+}
+
+trait InternalClipboard {
+	fn new<T: ClipboardHandler>(display_handle: &dyn HasDisplayHandle, handler: T) -> Self;
 
 	#[cfg(not(target_arch = "wasm32"))]
 	fn request_data(&self);
@@ -68,17 +62,17 @@ trait InternalClipboard<T: ClipboardConfig> {
 #[cfg_attr(target_arch = "wasm32", path = "wasm/mod.rs")]
 mod platform;
 
-pub struct Clipboard<T: ClipboardConfig> {
+pub struct Clipboard {
 	#[cfg_attr(
 		all(target_arch = "wasm32", not(feature = "unstable_write")),
 		allow(dead_code)
 	)]
-	internal: platform::Clipboard<T>,
+	internal: platform::Clipboard,
 }
 
-impl<T: ClipboardConfig> Clipboard<T> {
-	pub fn new(display_handle: &dyn HasDisplayHandle, config: T) -> Self {
-		let internal = platform::Clipboard::new(display_handle, config);
+impl Clipboard {
+	pub fn new<T: ClipboardHandler>(display_handle: &dyn HasDisplayHandle, handler: T) -> Self {
+		let internal = platform::Clipboard::new(display_handle, handler);
 		Self { internal }
 	}
 

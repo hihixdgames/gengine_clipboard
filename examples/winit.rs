@@ -6,7 +6,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use gengine_clipboard::{Clipboard, ClipboardConfig, ClipboardEvent};
+use gengine_clipboard::{Clipboard, ClipboardError, ClipboardEvent, ClipboardHandler};
 use softbuffer::{Context, Surface};
 use winit::{
 	application::ApplicationHandler,
@@ -22,7 +22,7 @@ struct ContextSurface {
 }
 
 struct ExampleConfig {
-	proxy: EventLoopProxy<ClipboardEvent<ClipboardData>>,
+	proxy: EventLoopProxy<ClipboardData>,
 }
 
 #[derive(Debug)]
@@ -31,68 +31,79 @@ enum ClipboardData {
 	Png(Vec<u8>),
 }
 
-impl ClipboardConfig for ExampleConfig {
-	type ClipboardData = ClipboardData;
+impl ClipboardHandler for ExampleConfig {
+	fn handle_event(&mut self, event: ClipboardEvent<'_>) {
+		match event {
+			ClipboardEvent::StartedPasteHandling { source } => {
+				log::info!("Started paste handling {:?}", source);
+			}
+			ClipboardEvent::FailedPasteHandling { source, error } => {
+				log::error!("Failed paste handling {:?} with error {:?}", source, error)
+			}
+			ClipboardEvent::PasteResult { source, data } => {
+				let mime_types = data.mime_types().to_vec();
+				log::info!("Got mime types: {:?} from {:?}", mime_types, source);
 
-	fn callback(&mut self, event: ClipboardEvent<ClipboardData>) {
-		let _ = self.proxy.send_event(event);
-	}
-
-	fn resolve_paste_data(
-		mime_types: Vec<String>,
-		data_access: &mut impl gengine_clipboard::PasteDataAccess,
-	) -> Result<Self::ClipboardData, gengine_clipboard::ClipboardError> {
-		log::info!("Got mime types: {:?}", mime_types);
-
-		let result = if mime_types.contains(&String::from("image/png")) {
-			data_access.get_data("image/png")
-		} else if mime_types.contains(&String::from("PNG")) {
-			data_access.get_data("PNG")
-		} else if mime_types.contains(&String::from("text/plain;charset=utf-8")) {
-			data_access.get_data("text/plain;charset=utf-8")
-		} else if mime_types.contains(&String::from("UTF8_STRING")) {
-			data_access.get_data("UTF8_STRING")
-		} else if mime_types.contains(&String::from("text/plain")) {
-			data_access.get_data("text/plain")
-		} else if mime_types.contains(&String::from("CF_UNICODETEXT")) {
-			data_access.get_data("CF_UNICODETEXT").map(|data| {
-				let data: Vec<u16> = data
-					.chunks(2)
-					.map(|v| ((v[1] as u16) << 8) | v[0] as u16)
-					.collect();
-				String::from_utf16_lossy(&data).as_bytes().to_vec()
-			})
-		} else {
-			return Err(gengine_clipboard::ClipboardError::UnsupportedMimeType);
-		};
-
-		match result {
-			Ok(data) => {
-				if mime_types.contains(&String::from("image/png"))
-					|| mime_types.contains(&String::from("PNG"))
-				{
-					Ok(ClipboardData::Png(data))
-				} else if let Cow::Owned(string) = String::from_utf8_lossy(&data) {
-					Ok(ClipboardData::Text(string))
+				let result = if mime_types.contains(&String::from("image/png")) {
+					data.get_data("image/png")
+				} else if mime_types.contains(&String::from("PNG")) {
+					data.get_data("PNG")
+				} else if mime_types.contains(&String::from("text/plain;charset=utf-8")) {
+					data.get_data("text/plain;charset=utf-8")
+				} else if mime_types.contains(&String::from("UTF8_STRING")) {
+					data.get_data("UTF8_STRING")
+				} else if mime_types.contains(&String::from("text/plain")) {
+					data.get_data("text/plain")
+				} else if mime_types.contains(&String::from("CF_UNICODETEXT")) {
+					data.get_data("CF_UNICODETEXT").map(|data| {
+						let data: Vec<u16> = data
+							.chunks(2)
+							.map(|v| ((v[1] as u16) << 8) | v[0] as u16)
+							.collect();
+						String::from_utf16_lossy(&data).as_bytes().to_vec()
+					})
 				} else {
-					// Not owned means that it is valid.
-					Ok(ClipboardData::Text(String::from_utf8(data).unwrap()))
+					log::error!(
+						"Failed paste handling {:?} with error {:?}",
+						source,
+						ClipboardError::UnsupportedMimeType
+					);
+					return;
+				};
+
+				match result {
+					Ok(data) => {
+						if mime_types.contains(&String::from("image/png"))
+							|| mime_types.contains(&String::from("PNG"))
+						{
+							let _ = self.proxy.send_event(ClipboardData::Png(data));
+						} else if let Cow::Owned(string) = String::from_utf8_lossy(&data) {
+							let _ = self.proxy.send_event(ClipboardData::Text(string));
+						} else {
+							// Not owned means that it is valid.
+							let _ = self
+								.proxy
+								.send_event(ClipboardData::Text(String::from_utf8(data).unwrap()));
+						}
+					}
+					Err(error) => {
+						log::error!("Failed paste handling {:?} with error {:?}", source, error)
+					}
 				}
 			}
-			Err(error) => Err(error),
 		}
 	}
 }
 
 struct ExampleWindow {
-	proxy: EventLoopProxy<ClipboardEvent<ClipboardData>>,
+	proxy: EventLoopProxy<ClipboardData>,
 	context_surface: Option<ContextSurface>,
-	clipboard: Option<Clipboard<ExampleConfig>>,
+	clipboard: Option<Clipboard>,
 	ctrl_left: bool,
 	ctrl_right: bool,
 }
 
-impl ApplicationHandler<ClipboardEvent<ClipboardData>> for ExampleWindow {
+impl ApplicationHandler<ClipboardData> for ExampleWindow {
 	fn resumed(&mut self, event_loop: &ActiveEventLoop) {
 		if self.context_surface.is_none() {
 			let window_attributes = Window::default_attributes().with_title("Clipboard Example");
@@ -154,56 +165,42 @@ impl ApplicationHandler<ClipboardEvent<ClipboardData>> for ExampleWindow {
 		}
 	}
 
-	fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ClipboardEvent<ClipboardData>) {
+	fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ClipboardData) {
 		match event {
-			ClipboardEvent::StartedPasteHandling { source } => {
-				log::info!("Started paste handling {:?}", source);
+			ClipboardData::Text(text) => {
+				log::info!("Reseived from the string: {}", text);
 			}
-			ClipboardEvent::FailedPasteHandling { source, error } => {
-				log::info!("Failed paste handling {:?} with error {:?}", source, error)
+			ClipboardData::Png(png) => {
+				#[cfg(not(target_arch = "wasm32"))]
+				{
+					log::info!("Received a PNG from. Saving it into image.png.");
+					std::fs::write("./image.png", png).expect("Failed to write into file")
+				}
+				#[cfg(target_arch = "wasm32")]
+				{
+					use js_sys::Uint8Array;
+					use wasm_bindgen::JsCast;
+					use web_sys::{Blob, Url, window};
+
+					log::info!("Received a PNG from. Adding it to the document.");
+
+					let uint8_array = Uint8Array::new_from_slice(&png);
+					let array = js_sys::Array::new();
+					array.push(&uint8_array);
+					let blob = Blob::new_with_u8_array_sequence(&array).unwrap();
+					let url = Url::create_object_url_with_blob(&blob).unwrap();
+
+					let window = window().unwrap();
+					let document = window.document().unwrap();
+
+					let image: web_sys::HtmlImageElement =
+						document.create_element("img").unwrap().dyn_into().unwrap();
+					image.set_src(&url);
+
+					let body = document.body().unwrap();
+					body.append_child(&image.into()).unwrap();
+				}
 			}
-			ClipboardEvent::PasteResult { source, data } => match data {
-				ClipboardData::Text(text) => {
-					log::info!("Reseived from {:?} the string: {}", source, text);
-				}
-				ClipboardData::Png(png) => {
-					#[cfg(not(target_arch = "wasm32"))]
-					{
-						log::info!(
-							"Received a PNG from {:?}. Saving it into image.png.",
-							source
-						);
-						std::fs::write("./image.png", png).expect("Failed to write into file")
-					}
-					#[cfg(target_arch = "wasm32")]
-					{
-						use js_sys::Uint8Array;
-						use wasm_bindgen::JsCast;
-						use web_sys::{Blob, Url, window};
-
-						log::info!(
-							"Received a PNG from {:?}. Adding it to the document.",
-							source
-						);
-
-						let uint8_array = Uint8Array::new_from_slice(&png);
-						let array = js_sys::Array::new();
-						array.push(&uint8_array);
-						let blob = Blob::new_with_u8_array_sequence(&array).unwrap();
-						let url = Url::create_object_url_with_blob(&blob).unwrap();
-
-						let window = window().unwrap();
-						let document = window.document().unwrap();
-
-						let image: web_sys::HtmlImageElement =
-							document.create_element("img").unwrap().dyn_into().unwrap();
-						image.set_src(&url);
-
-						let body = document.body().unwrap();
-						body.append_child(&image.into()).unwrap();
-					}
-				}
-			},
 		}
 	}
 }
@@ -221,7 +218,7 @@ fn main() {
 			.filter_level(log::LevelFilter::Info)
 			.init();
 	}
-	let event_loop = EventLoop::<ClipboardEvent<ClipboardData>>::with_user_event()
+	let event_loop = EventLoop::<ClipboardData>::with_user_event()
 		.build()
 		.unwrap();
 

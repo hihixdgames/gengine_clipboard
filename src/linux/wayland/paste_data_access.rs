@@ -4,16 +4,25 @@ use std::io::Read;
 use crate::{ClipboardError, PasteDataAccess};
 
 pub(super) struct WaylandPasteDataAccess {
+	mime_types: Vec<String>,
 	selection: SelectionOffer,
 }
 
 impl WaylandPasteDataAccess {
 	pub fn new(selection: SelectionOffer) -> Self {
-		Self { selection }
+		let mime_types = selection.with_mime_types(|offers| offers.to_vec());
+		Self {
+			mime_types,
+			selection,
+		}
 	}
 }
 
 impl PasteDataAccess for WaylandPasteDataAccess {
+	fn mime_types(&self) -> &[String] {
+		&self.mime_types
+	}
+
 	fn get_data(&mut self, mime_type: &str) -> Result<Vec<u8>, ClipboardError> {
 		let mut read_pipe = match self.selection.receive(mime_type.to_string()) {
 			Ok(read_pipe) => read_pipe,

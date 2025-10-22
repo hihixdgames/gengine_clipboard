@@ -4,33 +4,33 @@ mod x11;
 use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 
 use crate::{
-	ClipboardConfig, InternalClipboard,
+	ClipboardHandler, InternalClipboard,
 	platform::{wayland::WaylandClipboard, x11::X11Clipboard},
 };
 
-pub enum Internal<T: ClipboardConfig> {
-	X11(X11Clipboard<T>),
-	Wayland(WaylandClipboard<T>),
+pub enum Internal {
+	X11(X11Clipboard),
+	Wayland(WaylandClipboard),
 }
 
-pub struct Clipboard<T: ClipboardConfig> {
-	internal: Internal<T>,
+pub struct Clipboard {
+	internal: Internal,
 }
 
-impl<T: ClipboardConfig> InternalClipboard<T> for Clipboard<T> {
-	fn new(display_handle: &dyn HasDisplayHandle, behaviour: T) -> Self {
+impl InternalClipboard for Clipboard {
+	fn new<T: ClipboardHandler>(display_handle: &dyn HasDisplayHandle, handler: T) -> Self {
 		let handle = display_handle.display_handle().unwrap();
 		match handle.as_raw() {
 			RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_) => {
 				println!("Using X11");
 				Clipboard {
-					internal: Internal::X11(X11Clipboard::new(display_handle, behaviour)),
+					internal: Internal::X11(X11Clipboard::new(display_handle, handler)),
 				}
 			}
 			RawDisplayHandle::Wayland(_) => {
 				println!("Using wayland!");
 				Clipboard {
-					internal: Internal::Wayland(WaylandClipboard::new(display_handle, behaviour)),
+					internal: Internal::Wayland(WaylandClipboard::new(display_handle, handler)),
 				}
 			}
 			_ => panic!(),

@@ -1,10 +1,8 @@
 mod clipboard_handler;
+mod even_handler_thread;
 mod paste_data_access;
 
-use std::{
-	marker::PhantomData,
-	thread::{self, JoinHandle},
-};
+use std::thread::{self, JoinHandle};
 
 use raw_window_handle::RawDisplayHandle;
 use sctk::reexports::{
@@ -16,13 +14,12 @@ use sctk::reexports::{
 };
 
 use crate::{
-	ClipboardConfig, InternalClipboard, platform::wayland::clipboard_handler::ClipboardHandler,
+	ClipboardHandler, InternalClipboard, platform::wayland::clipboard_handler::WaylandHandler,
 };
 
-pub struct WaylandClipboard<T: ClipboardConfig> {
+pub struct WaylandClipboard {
 	sender: Sender<ThreadCommand>,
 	handle: Option<JoinHandle<()>>,
-	phantom_data: PhantomData<T>,
 }
 
 pub enum ThreadCommand {
@@ -30,8 +27,11 @@ pub enum ThreadCommand {
 	Exit,
 }
 
-impl<T: ClipboardConfig> InternalClipboard<T> for WaylandClipboard<T> {
-	fn new(window_handle: &dyn raw_window_handle::HasDisplayHandle, behaviour: T) -> Self {
+impl InternalClipboard for WaylandClipboard {
+	fn new<T: ClipboardHandler>(
+		window_handle: &dyn raw_window_handle::HasDisplayHandle,
+		handler: T,
+	) -> Self {
 		let (sender, receiver) = channel::<ThreadCommand>();
 
 		let display_handle = window_handle.display_handle().unwrap();
@@ -43,7 +43,7 @@ impl<T: ClipboardConfig> InternalClipboard<T> for WaylandClipboard<T> {
 		let backend = unsafe { Backend::from_foreign_display(display.as_ptr().cast()) };
 
 		let handle = thread::spawn(move || {
-			let mut event_loop = EventLoop::<ClipboardHandler<T>>::try_new().unwrap();
+			let mut event_loop = EventLoop::<WaylandHandler>::try_new().unwrap();
 			let loop_handle = event_loop.handle();
 			loop_handle
 				.insert_source(receiver, |event, _, state| {
@@ -58,11 +58,12 @@ impl<T: ClipboardConfig> InternalClipboard<T> for WaylandClipboard<T> {
 				})
 				.unwrap();
 
-			let mut handler =
-				ClipboardHandler::<T>::create_and_insert(backend, loop_handle.clone(), behaviour);
+			let mut wayland_handler =
+				WaylandHandler::create_and_insert(backend, loop_handle.clone(), handler);
 
 			loop {
-				if event_loop.dispatch(None, &mut handler).is_err() || handler.exit {
+				if event_loop.dispatch(None, &mut wayland_handler).is_err() || wayland_handler.exit
+				{
 					break;
 				}
 			}
@@ -71,7 +72,6 @@ impl<T: ClipboardConfig> InternalClipboard<T> for WaylandClipboard<T> {
 		Self {
 			sender,
 			handle: Some(handle),
-			phantom_data: PhantomData,
 		}
 	}
 
@@ -85,7 +85,7 @@ impl<T: ClipboardConfig> InternalClipboard<T> for WaylandClipboard<T> {
 	}
 }
 
-impl<T: ClipboardConfig> Drop for WaylandClipboard<T> {
+impl Drop for WaylandClipboard {
 	fn drop(&mut self) {
 		let _ = self.sender.send(ThreadCommand::Exit);
 		if let Some(handle) = self.handle.take() {
