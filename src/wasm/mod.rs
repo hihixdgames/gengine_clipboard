@@ -3,23 +3,21 @@ mod pasta_data_access;
 
 use js_sys::Uint8Array;
 use raw_window_handle::HasDisplayHandle;
-use std::marker::PhantomData;
 use wasm_bindgen::{JsCast, prelude::Closure};
 use web_sys::{Event, FileReader};
 
 use crate::{
-	ClipboardConfig, ClipboardError, InternalClipboard,
+	ClipboardError, ClipboardHandler, InternalClipboard,
 	platform::collector::{Collector, CollectorHandle},
 };
 
-pub struct Clipboard<T: ClipboardConfig> {
+pub struct Clipboard {
 	_handle: CollectorHandle,
-	phantom: PhantomData<T>,
 }
 
-impl<T: ClipboardConfig> InternalClipboard<T> for Clipboard<T> {
-	fn new(_display_handle: &dyn HasDisplayHandle, config: T) -> Self {
-		let (handle, collector) = Collector::new(config);
+impl InternalClipboard for Clipboard {
+	fn new<T: ClipboardHandler>(_display_handle: &dyn HasDisplayHandle, handler: T) -> Self {
+		let (handle, collector) = Collector::new(handler);
 
 		let mut n_events = 0;
 
@@ -80,10 +78,7 @@ impl<T: ClipboardConfig> InternalClipboard<T> for Clipboard<T> {
 			document.add_event_listener_with_callback("paste", on_paste.as_ref().unchecked_ref());
 		on_paste.forget();
 
-		Self {
-			_handle: handle,
-			phantom: PhantomData,
-		}
+		Self { _handle: handle }
 	}
 
 	#[cfg(feature = "unstable_write")]

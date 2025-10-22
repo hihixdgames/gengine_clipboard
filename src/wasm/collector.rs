@@ -4,7 +4,7 @@ use js_sys::{Array, Function, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue, prelude::Closure};
 
 use crate::{
-	ClipboardConfig, ClipboardError, ClipboardEvent, ClipboardEventSource,
+	ClipboardError, ClipboardEvent, ClipboardEventSource, ClipboardHandler,
 	platform::pasta_data_access::WasmDataAccess,
 };
 
@@ -24,7 +24,7 @@ pub struct Collector {
 }
 
 impl Collector {
-	pub fn new<T: ClipboardConfig>(mut config: T) -> (CollectorHandle, Collector) {
+	pub fn new<T: ClipboardHandler>(mut handler: T) -> (CollectorHandle, Collector) {
 		let mut storage: HashMap<usize, DataStorage> = HashMap::new();
 
 		let callback = Closure::<dyn FnMut(_, _, _)>::new(
@@ -50,13 +50,13 @@ impl Collector {
 
 						storage.entry(source.value).or_default().size = Some(size);
 
-						config.callback(ClipboardEvent::StartedPasteHandling { source });
+						handler.handle_event(ClipboardEvent::StartedPasteHandling { source });
 					}
 					"error" => {
 						let code = data.as_f64().unwrap() as u32;
 						let error = ClipboardError::try_from(code).unwrap();
-						return config
-							.callback(ClipboardEvent::FailedPasteHandling { source, error });
+						return handler
+							.handle_event(ClipboardEvent::FailedPasteHandling { source, error });
 					}
 					_ => unreachable!(),
 				}
@@ -69,7 +69,7 @@ impl Collector {
 				let collected = storage.remove(&source.value).unwrap();
 
 				if collected.data.is_empty() {
-					return config.callback(ClipboardEvent::FailedPasteHandling {
+					return handler.handle_event(ClipboardEvent::FailedPasteHandling {
 						source,
 						error: ClipboardError::Empty,
 					});
@@ -80,14 +80,12 @@ impl Collector {
 					.iter()
 					.map(|(mime_type, _)| mime_type.clone())
 					.collect();
-				let mut data_access = WasmDataAccess::new(collected.data);
-				let event: ClipboardEvent<T::ClipboardData> =
-					match T::resolve_paste_data(mime_types, &mut data_access) {
-						Ok(data) => ClipboardEvent::PasteResult { source, data },
-						Err(error) => ClipboardEvent::FailedPasteHandling { source, error },
-					};
+				let mut data_access = WasmDataAccess::new(mime_types, collected.data);
 
-				config.callback(event);
+				handler.handle_event(ClipboardEvent::PasteResult {
+					data: &mut data_access,
+					source,
+				});
 			},
 		);
 
