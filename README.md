@@ -15,6 +15,5 @@ This library is being developed for an internal game engine at [hihi XD](https:/
 ⚠️ = You can't read clipboard content whenever. Instead you need to wait for events. 
 
 ## Development todo
-- Mime type handling to unify platform differences
 - Proper error handling and miminize potential program crashes
 - writing data to the clipboard
