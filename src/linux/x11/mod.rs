@@ -1,11 +1,12 @@
 pub mod atoms;
 pub mod paste_data_access;
 
+use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
-use crate::platform::x11::paste_data_access::ConnectionHandler;
-use crate::{ClipboardEvent, ClipboardEventSource, ClipboardHandler};
+pub use crate::platform::x11::paste_data_access::ConnectionHandler;
+use crate::{ClipboardEvent, ClipboardEventSource, ClipboardHandler, DataAccess};
 
 use raw_window_handle::HasDisplayHandle;
 #[allow(unused_imports)]
@@ -30,7 +31,7 @@ impl InternalClipboard for X11Clipboard {
 	fn new<T: ClipboardHandler>(_display_handle: &dyn HasDisplayHandle, mut handler: T) -> Self {
 		let (sender, receiver) = mpsc::channel();
 		let join_handle = Some(thread::spawn(move || {
-			let connection = ConnectionHandler::new();
+			let connection = Rc::new(ConnectionHandler::new());
 			let mut event_conut = 0;
 
 			for command in receiver {
@@ -41,8 +42,8 @@ impl InternalClipboard for X11Clipboard {
 
 						handler.handle_event(ClipboardEvent::StartedPasteHandling { source });
 
-						let mut data = match connection.get_data_access() {
-							Ok(data_access) => data_access,
+						let mime_types = match connection.mime_types() {
+							Ok(mime_types) => mime_types,
 							Err(error) => {
 								handler.handle_event(ClipboardEvent::FailedPasteHandling {
 									source,
@@ -52,9 +53,17 @@ impl InternalClipboard for X11Clipboard {
 							}
 						};
 
+						let data_access = super::DataAccess::X11 {
+							conn: connection.clone(),
+							mime_types,
+						};
+						let data_access = DataAccess {
+							internal: data_access,
+						};
+
 						handler.handle_event(ClipboardEvent::PasteResult {
 							source,
-							data: &mut data,
+							data: &data_access,
 						});
 					}
 					ThreadCommand::Exit => break,

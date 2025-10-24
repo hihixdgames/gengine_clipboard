@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-	ClipboardError, ClipboardEvent, ClipboardEventSource, ClipboardHandler,
+	ClipboardError, ClipboardEvent, ClipboardEventSource, ClipboardHandler, DataAccess,
 	platform::wayland::paste_data_access::WaylandPasteDataAccess,
 };
 
@@ -41,10 +41,15 @@ impl HandlerThread {
 					FailedPasteHandling { source, error } => {
 						handler.handle_event(ClipboardEvent::FailedPasteHandling { source, error })
 					}
-					PasteResult { source, mut data } => {
+					PasteResult { source, data } => {
+						let data_access = super::super::DataAccess::Wayland(data);
+						let data_access = DataAccess {
+							internal: data_access,
+						};
+
 						handler.handle_event(ClipboardEvent::PasteResult {
 							source,
-							data: &mut data,
+							data: &data_access,
 						});
 					}
 					Exit => {

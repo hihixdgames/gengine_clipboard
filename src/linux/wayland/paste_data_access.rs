@@ -1,9 +1,9 @@
 use sctk::data_device_manager::data_offer::SelectionOffer;
 use std::io::Read;
 
-use crate::{ClipboardError, PasteDataAccess};
+use crate::{ClipboardError, internal::InternalDataAccess};
 
-pub(super) struct WaylandPasteDataAccess {
+pub struct WaylandPasteDataAccess {
 	mime_types: Vec<String>,
 	selection: SelectionOffer,
 }
@@ -18,12 +18,12 @@ impl WaylandPasteDataAccess {
 	}
 }
 
-impl PasteDataAccess for WaylandPasteDataAccess {
+impl InternalDataAccess for WaylandPasteDataAccess {
 	fn mime_types(&self) -> &[String] {
 		&self.mime_types
 	}
 
-	fn get_data(&mut self, mime_type: &str) -> Result<Vec<u8>, ClipboardError> {
+	fn get_raw_data(&self, mime_type: &str) -> Result<Vec<u8>, ClipboardError> {
 		let mut read_pipe = match self.selection.receive(mime_type.to_string()) {
 			Ok(read_pipe) => read_pipe,
 			_ => {

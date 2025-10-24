@@ -41,21 +41,21 @@ impl ClipboardHandler for ExampleConfig {
 				log::error!("Failed paste handling {:?} with error {:?}", source, error)
 			}
 			ClipboardEvent::PasteResult { source, data } => {
-				let mime_types = data.mime_types().to_vec();
+				let mime_types = data.raw_types().to_vec();
 				log::info!("Got mime types: {:?} from {:?}", mime_types, source);
 
 				let result = if mime_types.contains(&String::from("image/png")) {
-					data.get_data("image/png")
+					data.get_raw_data("image/png")
 				} else if mime_types.contains(&String::from("PNG")) {
-					data.get_data("PNG")
+					data.get_raw_data("PNG")
 				} else if mime_types.contains(&String::from("text/plain;charset=utf-8")) {
-					data.get_data("text/plain;charset=utf-8")
+					data.get_raw_data("text/plain;charset=utf-8")
 				} else if mime_types.contains(&String::from("UTF8_STRING")) {
-					data.get_data("UTF8_STRING")
+					data.get_raw_data("UTF8_STRING")
 				} else if mime_types.contains(&String::from("text/plain")) {
-					data.get_data("text/plain")
+					data.get_raw_data("text/plain")
 				} else if mime_types.contains(&String::from("CF_UNICODETEXT")) {
-					data.get_data("CF_UNICODETEXT").map(|data| {
+					data.get_raw_data("CF_UNICODETEXT").map(|data| {
 						let data: Vec<u16> = data
 							.chunks(2)
 							.map(|v| ((v[1] as u16) << 8) | v[0] as u16)
