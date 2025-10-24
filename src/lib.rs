@@ -1,4 +1,5 @@
 mod clipboard_error;
+mod implementations;
 mod internal;
 
 pub use clipboard_error::*;
@@ -24,9 +25,9 @@ pub trait WriteToClipboard {
 }
 
 pub trait ReadFromClipboard: Sized {
-	fn is_available(mime_types: &[String]) -> bool;
+	fn is_available(mime_types: &[&str]) -> bool;
 
-	fn read(data: &mut DataAccess) -> Option<Self>;
+	fn read(data: &DataAccess) -> Option<Self>;
 }
 
 /// This indicates the source from which a ClipboardEvent originates from.
@@ -65,20 +66,36 @@ pub struct DataAccess {
 }
 
 impl DataAccess {
-	pub fn raw_types(&self) -> &[String] {
+	pub fn raw_types(&self) -> Vec<&str> {
 		<platform::DataAccess as InternalDataAccess>::mime_types(&self.internal)
+			.iter()
+			.map(|ty| ty.as_str())
+			.collect()
 	}
 
-	pub fn get_raw_data(&self, mime_type: &str) -> Result<Vec<u8>, ClipboardError> {
-		<platform::DataAccess as InternalDataAccess>::get_raw_data(&self.internal, mime_type)
+	pub fn get_raw_data(&self, raw_type: &str) -> Result<Vec<u8>, ClipboardError> {
+		<platform::DataAccess as InternalDataAccess>::get_raw_data(&self.internal, raw_type)
 	}
 
 	pub fn is_available<T: ReadFromClipboard>(&self) -> bool {
-		T::is_available(self.raw_types())
+		T::is_available(&self.raw_types())
 	}
 
-	pub fn get_data<T: ReadFromClipboard>(&mut self) -> Option<T> {
+	pub fn read_data<T: ReadFromClipboard>(&self) -> Option<T> {
 		T::read(self)
+	}
+
+	pub fn get_first_success(&self, raw_types: &[&str]) -> Option<Vec<u8>> {
+		let available = self.raw_types();
+		for raw_type in raw_types {
+			if available.contains(raw_type)
+				&& let Ok(bytes) = self.get_raw_data(raw_type)
+			{
+				return Some(bytes);
+			}
+		}
+
+		None
 	}
 }
 
