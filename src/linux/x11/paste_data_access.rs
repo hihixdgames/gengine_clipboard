@@ -91,12 +91,17 @@ impl ConnectionHandler {
 						continue;
 					}
 
-					let reply = self
+					let reply = match self
 						.conn
 						.get_property(false, self.window, event.property, target, 0, 0)
 						.unwrap()
 						.reply()
-						.unwrap();
+					{
+						Ok(reply) => reply,
+						Err(_) => {
+							return Err(ClipboardError::Empty);
+						}
+					};
 
 					if reply.type_ == self.atoms.incr {
 						incr = true;
