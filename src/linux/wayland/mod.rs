@@ -17,6 +17,8 @@ use crate::{
 	ClipboardHandler, InternalClipboard, platform::wayland::clipboard_handler::WaylandHandler,
 };
 
+pub use paste_data_access::WaylandPasteDataAccess;
+
 pub struct WaylandClipboard {
 	sender: Sender<ThreadCommand>,
 	handle: Option<JoinHandle<()>>,

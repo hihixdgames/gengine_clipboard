@@ -13,7 +13,7 @@ use x11rb::{
 	rust_connection::RustConnection,
 };
 
-use crate::{ClipboardError, PasteDataAccess, platform::x11::atoms::AtomManager};
+use crate::{ClipboardError, platform::x11::atoms::AtomManager};
 
 const TIMEOUT_LIMIT: Duration = Duration::from_secs(2);
 
@@ -174,7 +174,7 @@ impl ConnectionHandler {
 		Ok(data)
 	}
 
-	fn get_mime_types(&self) -> Result<Vec<String>, ClipboardError> {
+	pub fn mime_types(&self) -> Result<Vec<String>, ClipboardError> {
 		let bytes = self.get_selection(self.atoms.targets)?;
 		let (atoms, remainder) = bytes.as_chunks::<4>();
 		if !remainder.is_empty() {
@@ -190,27 +190,8 @@ impl ConnectionHandler {
 		Ok(names)
 	}
 
-	pub fn get_data_access(&self) -> Result<X11DataAcess<'_>, ClipboardError> {
-		let mime_types = self.get_mime_types()?;
-		Ok(X11DataAcess {
-			mime_types,
-			connection: self,
-		})
-	}
-}
-
-pub struct X11DataAcess<'a> {
-	mime_types: Vec<String>,
-	connection: &'a ConnectionHandler,
-}
-
-impl<'a> PasteDataAccess for X11DataAcess<'a> {
-	fn mime_types(&self) -> &[String] {
-		&self.mime_types
-	}
-
-	fn get_data(&mut self, mime_type: &str) -> Result<Vec<u8>, ClipboardError> {
-		let target = AtomManager::get_atom(&self.connection.conn, mime_type.as_bytes()).unwrap();
-		self.connection.get_selection(target)
+	pub fn get_raw_data(&self, mime_type: &str) -> Result<Vec<u8>, ClipboardError> {
+		let target = AtomManager::get_atom(&self.conn, mime_type.as_bytes()).unwrap();
+		self.get_selection(target)
 	}
 }

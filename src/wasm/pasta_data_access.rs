@@ -1,6 +1,6 @@
 use js_sys::Uint8Array;
 
-use crate::{ClipboardError, PasteDataAccess};
+use crate::{ClipboardError, internal::InternalDataAccess};
 
 pub struct WasmDataAccess {
 	mime_types: Vec<String>,
@@ -13,12 +13,12 @@ impl WasmDataAccess {
 	}
 }
 
-impl PasteDataAccess for WasmDataAccess {
+impl InternalDataAccess for WasmDataAccess {
 	fn mime_types(&self) -> &[String] {
 		&self.mime_types
 	}
 
-	fn get_data(&mut self, mime_type: &str) -> Result<Vec<u8>, crate::ClipboardError> {
+	fn get_raw_data(&self, mime_type: &str) -> Result<Vec<u8>, crate::ClipboardError> {
 		for (mime, data) in self.data.iter() {
 			if mime == mime_type {
 				let mut raw = vec![0; data.length() as usize];

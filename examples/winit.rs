@@ -1,4 +1,4 @@
-use std::{borrow::Cow, num::NonZeroU32, rc::Rc, time::Duration};
+use std::{num::NonZeroU32, rc::Rc, time::Duration};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -6,7 +6,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use gengine_clipboard::{Clipboard, ClipboardError, ClipboardEvent, ClipboardHandler};
+use gengine_clipboard::{Clipboard, ClipboardEvent, ClipboardHandler};
 use softbuffer::{Context, Surface};
 use winit::{
 	application::ApplicationHandler,
@@ -35,61 +35,21 @@ impl ClipboardHandler for ExampleConfig {
 	fn handle_event(&mut self, event: ClipboardEvent<'_>) {
 		match event {
 			ClipboardEvent::StartedPasteHandling { source } => {
-				log::info!("Started paste handling {:?}", source);
+				log::info!("Started paste handling {source:?}");
 			}
 			ClipboardEvent::FailedPasteHandling { source, error } => {
-				log::error!("Failed paste handling {:?} with error {:?}", source, error)
+				log::error!("Failed paste handling {source:?} with error {error:?}")
 			}
 			ClipboardEvent::PasteResult { source, data } => {
-				let mime_types = data.mime_types().to_vec();
-				log::info!("Got mime types: {:?} from {:?}", mime_types, source);
+				log::info!("Got mime types: {:?} from {source:?}", data.raw_types());
 
-				let result = if mime_types.contains(&String::from("image/png")) {
-					data.get_data("image/png")
-				} else if mime_types.contains(&String::from("PNG")) {
-					data.get_data("PNG")
-				} else if mime_types.contains(&String::from("text/plain;charset=utf-8")) {
-					data.get_data("text/plain;charset=utf-8")
-				} else if mime_types.contains(&String::from("UTF8_STRING")) {
-					data.get_data("UTF8_STRING")
-				} else if mime_types.contains(&String::from("text/plain")) {
-					data.get_data("text/plain")
-				} else if mime_types.contains(&String::from("CF_UNICODETEXT")) {
-					data.get_data("CF_UNICODETEXT").map(|data| {
-						let data: Vec<u16> = data
-							.chunks(2)
-							.map(|v| ((v[1] as u16) << 8) | v[0] as u16)
-							.collect();
-						String::from_utf16_lossy(&data).as_bytes().to_vec()
-					})
+				if let Some(bytes) = data.get_first_success(&["image/png", "PNG"]) {
+					let _ = self.proxy.send_event(ClipboardData::Png(bytes));
+				} else if let Some(string) = data.read_data::<String>() {
+					let _ = self.proxy.send_event(ClipboardData::Text(string));
 				} else {
-					log::error!(
-						"Failed paste handling {:?} with error {:?}",
-						source,
-						ClipboardError::UnsupportedMimeType
-					);
-					return;
+					log::error!("Could not get wanted data for {source:?}");
 				};
-
-				match result {
-					Ok(data) => {
-						if mime_types.contains(&String::from("image/png"))
-							|| mime_types.contains(&String::from("PNG"))
-						{
-							let _ = self.proxy.send_event(ClipboardData::Png(data));
-						} else if let Cow::Owned(string) = String::from_utf8_lossy(&data) {
-							let _ = self.proxy.send_event(ClipboardData::Text(string));
-						} else {
-							// Not owned means that it is valid.
-							let _ = self
-								.proxy
-								.send_event(ClipboardData::Text(String::from_utf8(data).unwrap()));
-						}
-					}
-					Err(error) => {
-						log::error!("Failed paste handling {:?} with error {:?}", source, error)
-					}
-				}
 			}
 		}
 	}
