@@ -11,6 +11,8 @@ use crate::{
 	platform::collector::{Collector, CollectorHandle},
 };
 
+pub use pasta_data_access::WasmDataAccess as DataAccess;
+
 pub struct Clipboard {
 	_handle: CollectorHandle,
 }

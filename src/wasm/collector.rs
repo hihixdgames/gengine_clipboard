@@ -80,10 +80,13 @@ impl Collector {
 					.iter()
 					.map(|(mime_type, _)| mime_type.clone())
 					.collect();
-				let mut data_access = WasmDataAccess::new(mime_types, collected.data);
+				let data_access = WasmDataAccess::new(mime_types, collected.data);
+				let data_access = crate::DataAccess {
+					internal: data_access,
+				};
 
 				handler.handle_event(ClipboardEvent::PasteResult {
-					data: &mut data_access,
+					data: &data_access,
 					source,
 				});
 			},
