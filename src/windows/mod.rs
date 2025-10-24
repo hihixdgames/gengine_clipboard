@@ -10,6 +10,8 @@ use std::{
 	thread::{self, JoinHandle},
 };
 
+pub use paste_data_access::WindowsDataAccess as DataAccess;
+
 enum ThreadCommand {
 	GetData,
 	Exit,
@@ -36,7 +38,7 @@ impl InternalClipboard for Clipboard {
 						event_conut += 1;
 						handler.handle_event(ClipboardEvent::StartedPasteHandling { source });
 
-						let mut data_access = match WindowsDataAccess::new() {
+						let data_access = match WindowsDataAccess::new() {
 							Ok(data_access) => data_access,
 							Err(error) => {
 								handler.handle_event(ClipboardEvent::FailedPasteHandling {
@@ -46,9 +48,12 @@ impl InternalClipboard for Clipboard {
 								return;
 							}
 						};
+						let data_access = crate::DataAccess {
+							internal: data_access,
+						};
 
 						handler.handle_event(ClipboardEvent::PasteResult {
-							data: &mut data_access,
+							data: &data_access,
 							source,
 						});
 					}

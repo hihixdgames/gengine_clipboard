@@ -12,7 +12,8 @@ use windows::Win32::{
 };
 
 use crate::{
-	ClipboardError, PasteDataAccess,
+	ClipboardError,
+	internal::InternalDataAccess,
 	platform::format_conversion::{get_format_code, get_format_name},
 };
 
@@ -67,12 +68,12 @@ impl WindowsDataAccess {
 	}
 }
 
-impl PasteDataAccess for WindowsDataAccess {
+impl InternalDataAccess for WindowsDataAccess {
 	fn mime_types(&self) -> &[String] {
 		&self.mime_types
 	}
 
-	fn get_data(&mut self, mime_type: &str) -> Result<Vec<u8>, ClipboardError> {
+	fn get_raw_data(&self, mime_type: &str) -> Result<Vec<u8>, ClipboardError> {
 		let format = get_format_code(mime_type);
 		let handle = match unsafe { GetClipboardData(format) } {
 			Ok(handle) => handle,
